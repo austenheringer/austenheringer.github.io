@@ -1,0 +1,95 @@
+html {
+    background-color: rgb(23, 56, 38);
+}
+
+.black {
+    color: black;
+}
+
+header {
+    color: tan;
+    text-align: center;
+}
+
+section h2 {
+    color: tan;
+}
+
+
+.colors {
+    text-align: center;
+    border: dotted tan;
+    list-style-type: none;
+    padding: 0px 300px;
+    margin: 0;
+
+}
+
+.colors ul {
+    list-style: none;
+    padding: 5px;
+    margin: 5px;
+}
+
+.red,
+.lightblue,
+.white {
+    padding: 10px;
+    border: solid;
+}
+
+.red {
+    background-color: red;
+}
+
+.lightblue {
+    background-color: lightblue;
+    border-top: 0px;
+    border-bottom: 0px;
+}
+
+.white {
+    background-color: white;
+}
+
+.fonts {
+    text-align: center;
+    border: dotted tan;
+    margin-top: 30px;
+}
+
+.fonts ul {
+    list-style: none;
+    padding: 0;
+}
+
+.oswald400 {
+    font-family: 'Oswald', sans-serif;
+    font-weight: 400;
+    font-size: 14PX;
+}
+
+.oswald600 {
+    font-family: 'Oswald', sans-serif;
+    font-weight: 600;
+    font-size: 16px;
+}
+
+.oswald900 {
+    font-family: 'Oswald', sans-serif;
+    font-weight: 900;
+    font-size: 26px;
+}
+
+.textstyles {
+    text-align: center;
+    border: dotted tan;
+    margin-top: 30;
+    padding-bottom: 30PX;
+}
+
+.textstyles ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
