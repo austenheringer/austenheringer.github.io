@@ -24,6 +24,7 @@ import pandas as pd
 
 from warroom.analysis import indicators as ind
 from warroom.config import AppConfig
+from warroom.core.assets import AssetClass, AssetRouter, Instrument
 from warroom.core.clock import Clock, ensure_utc, et_to_utc
 from warroom.core.market_calendar import MarketCalendar, TradingSession
 from warroom.models.schemas import (
@@ -54,8 +55,14 @@ class TickerContext:
     prior_low: float | None = None
     prior_close: float | None = None
     trend_15m: Direction | None = None
-    bars_5m: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
+    bars_5m: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)  # setup bars (15m for crypto)
     possible_halt: bool = False
+    asset_class: AssetClass = AssetClass.EQUITY
+    instrument: Instrument | None = None
+
+    @property
+    def is_crypto(self) -> bool:
+        return self.asset_class is AssetClass.CRYPTO
 
     def data_age_seconds(self, now: datetime) -> float:
         return (ensure_utc(now) - self.last_bar_close).total_seconds()
@@ -69,12 +76,14 @@ class MacroBias:
 
 
 class TechnicalAgent:
-    def __init__(self, cfg: AppConfig, market: MarketDataProvider, calendar: MarketCalendar, clock: Clock) -> None:
+    def __init__(self, cfg: AppConfig, market: MarketDataProvider, calendar: MarketCalendar, clock: Clock,
+                 router: AssetRouter | None = None) -> None:
         self.cfg = cfg
         self.t = cfg.technical
         self.market = market
         self.calendar = calendar
         self.clock = clock
+        self.router = router or AssetRouter(calendar, cfg.crypto)
         self._last_debated: dict[tuple[str, Direction], datetime] = {}
 
     # ------------------------------------------------------------------ cooldown gate
@@ -97,7 +106,13 @@ class TechnicalAgent:
 
     # ------------------------------------------------------------------ context
 
+    def _real_quotes(self, ticker: str) -> bool:
+        f = getattr(self.market, "real_quotes_for", None)
+        return f(ticker) if f is not None else self.market.has_real_quotes
+
     async def build_context(self, ticker: str) -> TickerContext | None:
+        if self.router.is_crypto(ticker):
+            return await self._build_crypto_context(ticker)
         now = self.clock.now()
         session = self.calendar.session_for(now)
         if session is None:
@@ -152,16 +167,76 @@ class TechnicalAgent:
         )
         return TickerContext(
             ticker=ticker, snapshot=snap, session=session, quote=quote,
-            has_real_quotes=self.market.has_real_quotes and quote is not None,
+            has_real_quotes=self._real_quotes(ticker) and quote is not None,
             last_bar_close=last_bar_close,
             prior_high=prior[0] if prior else None, prior_low=prior[1] if prior else None,
             prior_close=prior[2] if prior else None, trend_15m=trend15, bars_5m=today5,
+            instrument=self.router.instrument(ticker),
         )
 
-    async def macro_bias(self) -> MacroBias:
+    async def _build_crypto_context(self, ticker: str) -> TickerContext | None:
+        """24/7 crypto: VWAP anchored at 00:00 UTC (on 5m bars - Kraken keeps only 12h of 1m),
+        EMAs/RSI/ATR/swings/range on the setup timeframe (15m default), 1h trend, prior
+        UTC-day levels, and a 7-day time-of-day RVOL baseline."""
+        c = self.cfg.crypto
+        now = self.clock.now()
+        session = self.router.crypto_schedule.session_for(now)
+        tf = Timeframe.M15 if c.timeframe == "15m" else Timeframe.M5
+        hist_days = 7 if tf is Timeframe.M15 else 2.4
+        try:
+            b1, b5, bset, quote = await asyncio.gather(
+                self.market.get_bars(ticker, Timeframe.M1, now - timedelta(hours=2)),
+                self.market.get_bars(ticker, Timeframe.M5, min(session.open, now - timedelta(hours=2))),
+                self.market.get_bars(ticker, tf, now - timedelta(days=hist_days)),
+                self.market.get_quote(ticker),
+            )
+        except ProviderError as exc:
+            log.warning("crypto data for %s unavailable: %s", ticker, exc)
+            return None
+        if b1.empty or bset.empty:
+            return None
+        price = float(b1["close"].iloc[-1])
+        today5 = ind.session_slice(b5, session.open, session.close)
+        vw = ind.vwap(today5 if len(today5) >= 3 else b5.iloc[-12:]).iloc[-1] if len(b5) else None
+        ema_f, ema_m, ema_s = (ind.ema(bset["close"], p).iloc[-1] for p in self.t.ema_periods)
+        rsi_v = ind.rsi(bset["close"], self.t.rsi_period).iloc[-1]
+        atr_v = ind.atr(bset, self.t.atr_period).iloc[-1]
+        prior = ind.prior_day_levels(bset, session.day, tz="UTC")
+        rvol_v = ind.relative_volume(bset, now, c.rvol_lookback_days, tz="UTC")
+        rng = ind.rolling_range(bset, c.range_lookback_minutes, now)
+        setup_bars = bset.iloc[-48:]
+        swings = ind.swing_levels(setup_bars, self.t.swing_lookback_bars)
+        hourly = ind.resample_ohlcv(bset, 60)
+        trend = None
+        if len(hourly) >= 21:
+            f, m = ind.ema(hourly["close"], 9).iloc[-1], ind.ema(hourly["close"], 21).iloc[-1]
+            trend = Direction.LONG if f > m else Direction.SHORT if f < m else None
+
+        def fin(x):
+            return None if x is None or pd.isna(x) else float(x)
+
+        snap = IndicatorSnapshot(
+            ticker=ticker, timestamp=b1.index[-1].to_pydatetime(), price=price, vwap=fin(vw),
+            ema9=fin(ema_f), ema21=fin(ema_m), ema50=fin(ema_s), rsi14=fin(rsi_v), atr14=fin(atr_v), rvol=fin(rvol_v),
+            spread_pct=quote.spread_pct if quote is not None else None,
+            swing_high=swings[0] if swings else None, swing_low=swings[1] if swings else None,
+            range_high=rng[0] if rng else None, range_low=rng[1] if rng else None,
+        )
+        return TickerContext(
+            ticker=ticker, snapshot=snap, session=session, quote=quote,
+            has_real_quotes=self._real_quotes(ticker) and quote is not None,
+            last_bar_close=b1.index[-1].to_pydatetime() + timedelta(minutes=1),
+            prior_high=prior[0] if prior else None, prior_low=prior[1] if prior else None,
+            prior_close=prior[2] if prior else None, trend_15m=trend, bars_5m=setup_bars,
+            asset_class=AssetClass.CRYPTO, instrument=self.router.instrument(ticker, price),
+        )
+
+    async def macro_bias(self, asset_class: AssetClass = AssetClass.EQUITY) -> MacroBias:
+        """SPY/QQQ for equities; BTC (crypto.macro_symbol) for crypto."""
         votes: dict[str, Direction | None] = {}
         detail: dict[str, str] = {}
-        for sym in self.cfg.app.macro_tickers:
+        symbols = [self.cfg.crypto.macro_symbol] if asset_class is AssetClass.CRYPTO else self.cfg.app.macro_tickers
+        for sym in symbols:
             ctx = await self.build_context(sym)
             if ctx is None or ctx.snapshot.vwap is None or ctx.snapshot.ema9 is None or ctx.snapshot.ema21 is None:
                 votes[sym] = None
@@ -206,15 +281,16 @@ class TechnicalAgent:
             if rvol_ok:
                 conf += 0.1
                 why.append(f"RVOL {s.rvol:.1f}x confirms participation")
+            tape = "BTC" if ctx.is_crypto else "SPY/QQQ"
             if bias.direction is direction:
                 conf += 0.1
-                why.append(f"aligned with {bias.regime.value} tape (SPY/QQQ)")
+                why.append(f"aligned with {bias.regime.value} tape ({tape})")
             elif bias.direction is direction.opposite:
                 conf -= 0.15
-                why.append(f"against {bias.regime.value} tape (SPY/QQQ)")
+                why.append(f"against {bias.regime.value} tape ({tape})")
             if ctx.trend_15m is direction:
                 conf += 0.05
-                why.append("15m trend agrees")
+                why.append("1h trend agrees" if ctx.is_crypto else "15m trend agrees")
             found.append(TradeSetup(
                 ticker=ctx.ticker, direction=direction, setup_type=setup, detected_at=now, trigger_price=s.price,
                 confidence=round(min(1.0, max(0.0, conf)), 2), rationale=why, indicators=s,
@@ -230,6 +306,16 @@ class TechnicalAgent:
             if last["close"] < s.orb_low <= prev["close"] and s.price < s.vwap and s.rsi14 >= 20:
                 add(Direction.SHORT, SetupType.ORB_BREAKDOWN, 0.5,
                     [f"5m close {last['close']:.2f} broke ORB low {s.orb_low:.2f}", "holding below VWAP"])
+
+        # --- Crypto rolling-range breakout / breakdown (no opening bell in a 24/7 market)
+        if ctx.is_crypto and s.range_high is not None and s.range_low is not None:
+            hrs = self.cfg.crypto.range_lookback_minutes // 60
+            if last["close"] > s.range_high >= prev["close"] and s.price > s.vwap and s.rsi14 <= 80:
+                add(Direction.LONG, SetupType.RANGE_BREAKOUT, 0.5,
+                    [f"close {last['close']:.2f} broke the {hrs}h range high {s.range_high:.2f}", "above the UTC-day VWAP"])
+            if last["close"] < s.range_low <= prev["close"] and s.price < s.vwap and s.rsi14 >= 20:
+                add(Direction.SHORT, SetupType.RANGE_BREAKDOWN, 0.5,
+                    [f"close {last['close']:.2f} broke the {hrs}h range low {s.range_low:.2f}", "below the UTC-day VWAP"])
 
         # --- VWAP bounce / rejection
         if last["low"] <= s.vwap * (1 + touch) and last["close"] > s.vwap and last["close"] > last["open"] and s.ema9 > s.ema21:
@@ -259,6 +345,9 @@ class TechnicalAgent:
                 add(Direction.SHORT, SetupType.RVOL_MOMENTUM, 0.4,
                     [f"RVOL {s.rvol:.1f}x momentum bar closing near lows", f"RSI {s.rsi14:.0f}"])
 
+        # spot crypto cannot be shorted: don't convene debates that can only end in a veto
+        if ctx.instrument is not None and not ctx.instrument.allow_short:
+            found = [st for st in found if st.direction is Direction.LONG]
         # keep the best setup per direction
         best: dict[Direction, TradeSetup] = {}
         for st in found:
@@ -286,21 +375,22 @@ class TechnicalAgent:
 
     async def scan(self, tickers: list[str], bias: MacroBias | None = None) -> list[tuple[TradeSetup, TickerContext]]:
         """Build contexts and return setups that are NOT on cooldown, best confidence first."""
-        if not self.entry_window_open():
+        tickers = [t for t in tickers if self.entry_window_open(symbol=t)]
+        if not tickers:
             return []
-        bias = bias or await self.macro_bias()
+        bias = bias or await self.macro_bias(self.router.asset_class(tickers[0]))
         contexts = [c for c in await asyncio.gather(*(self.build_context(t) for t in tickers)) if c is not None]
         return self.scan_contexts(contexts, bias)
 
     def scan_contexts(self, contexts: list[TickerContext], bias: MacroBias) -> list[tuple[TradeSetup, TickerContext]]:
         """Setup detection over already-built contexts (the orchestrator builds them once per
         cycle and reuses them for the watchlist display)."""
-        if not self.entry_window_open():
-            return []
         out: list[tuple[TradeSetup, TickerContext]] = []
         now = self.clock.now()
         for ctx in contexts:
-            self.flag_possible_halt(ctx, contexts, now)
+            if not self.entry_window_open(now, ctx.ticker):
+                continue
+            self.flag_possible_halt(ctx, [c for c in contexts if c.asset_class is ctx.asset_class], now)
             for st in self.detect_setups(ctx, bias):
                 if self.on_cooldown(st.ticker, st.direction):
                     log.debug("cooldown: skip %s %s (%.0fs left)", st.ticker, st.direction.value,
@@ -309,10 +399,12 @@ class TechnicalAgent:
                 out.append((st, ctx))
         return sorted(out, key=lambda x: x[0].confidence, reverse=True)
 
-    def entry_window_open(self, now: datetime | None = None) -> bool:
-        """Scanning only proposes setups between the end of the opening range and the
-        entry cutoff; outside that window Risk would veto everything anyway."""
+    def entry_window_open(self, now: datetime | None = None, symbol: str | None = None) -> bool:
+        """Equities: between the end of the opening range and the entry cutoff (outside it Risk
+        would veto everything anyway). Crypto: always open."""
         now = now or self.clock.now()
+        if symbol is not None and self.router.is_crypto(symbol):
+            return True
         sess = self.calendar.session_for(now)
         if sess is None:
             return False
@@ -332,8 +424,9 @@ class TechnicalAgent:
     async def analyze(self, ticker: str, bias: MacroBias | None = None) -> tuple[TradeSetup, TickerContext] | None:
         """On-demand analysis (bypasses cooldown). Returns the best setup, or an
         unqualified lean when nothing fires, or None without data."""
-        bias = bias or await self.macro_bias()
-        ctx = await self.build_context(ticker.upper())
+        ticker = self.router.normalize(ticker)
+        bias = bias or await self.macro_bias(self.router.asset_class(ticker))
+        ctx = await self.build_context(ticker)
         if ctx is None:
             return None
         setups = self.detect_setups(ctx, bias, on_demand=True)

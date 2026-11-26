@@ -77,6 +77,40 @@ async def check_providers(cfg: AppConfig, secrets: Secrets, clock: Clock, calend
 
     results.append(await _timed(f"market data ({md.name}) bars", bars_check()))
     results.append(await _timed(f"market data ({md.name}) quote", quote_check()))
+
+    crypto = getattr(md, "crypto", None)
+    if crypto is not None and cfg.crypto.symbols:
+        sym = cfg.crypto.symbols[0]
+
+        async def crypto_bars():
+            df = await md.get_bars(sym, Timeframe.M15, now - timedelta(days=2))
+            if df.empty:
+                return False, f"no 15m bars for {sym}"
+            age = (now - df.index[-1].to_pydatetime()).total_seconds()
+            ok = age <= 15 * 60 + cfg.risk.max_data_age_seconds
+            return ok, f"{len(df)} bars, latest {df.index[-1]} (age {age:.0f}s)"
+
+        async def crypto_quote():
+            q = await md.get_quote(sym)
+            if q is None:
+                return False, "no quote"
+            ok = q.spread_pct <= cfg.crypto.max_spread_pct
+            return ok, f"bid {q.bid} ask {q.ask} spread {q.spread_pct:.4%} (max {cfg.crypto.max_spread_pct:.2%})"
+
+        async def crypto_status():
+            st = await crypto.system_status()
+            return st == "online", f"exchange status: {st}"
+
+        async def crypto_specs():
+            specs = await crypto.instruments(cfg.crypto.symbols, cfg.crypto.taker_fee_pct, cfg.crypto.maker_fee_pct,
+                                             cfg.crypto.allow_short)
+            missing = set(cfg.crypto.symbols) - {i.symbol for i in specs}
+            return not missing, (f"lot sizes for {len(specs)} pair(s)" + (f"; unknown: {sorted(missing)}" if missing else ""))
+
+        results.append(await _timed(f"crypto ({crypto.name}) bars", crypto_bars()))
+        results.append(await _timed(f"crypto ({crypto.name}) quote", crypto_quote()))
+        results.append(await _timed(f"crypto ({crypto.name}) status", crypto_status()))
+        results.append(await _timed(f"crypto ({crypto.name}) pairs", crypto_specs()))
     await md.aclose()
 
     macro, notes = await factory.build_macro_calendar(cfg, calendar, clock, Mode.PAPER)

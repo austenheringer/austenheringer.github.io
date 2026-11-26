@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from warroom.config import AppConfig
+from warroom.core.assets import AssetRouter
 from warroom.core.clock import Clock, ensure_utc
 from warroom.core.market_calendar import MarketCalendar
 from warroom.models.schemas import (
@@ -100,18 +101,26 @@ def weighted_sentiment(items: list[NewsItem], now: datetime, half_life_minutes: 
 
 
 class NewsAgent:
-    def __init__(self, cfg: AppConfig, news: NewsProvider, calendar: MarketCalendar, clock: Clock) -> None:
+    def __init__(self, cfg: AppConfig, news: NewsProvider, calendar: MarketCalendar, clock: Clock,
+                 router: AssetRouter | None = None) -> None:
         self.cfg = cfg
         self.n = cfg.news
         self.news = news
         self.calendar = calendar
         self.clock = clock
+        self.router = router or AssetRouter(calendar, cfg.crypto)
         self.last_error: str | None = None
 
-    async def events_window(self) -> list[MacroEvent]:
+    async def events_window(self, ticker: str | None = None) -> list[MacroEvent]:
+        """Macro events around now. Routed providers return the symbol's own set
+        (crypto: macro releases + exchange status; equities: + earnings and halts)."""
         now = self.clock.now()
+        start, end = now - timedelta(hours=8), now + timedelta(hours=2)
         try:
-            return await self.news.get_macro_events(now - timedelta(hours=8), now + timedelta(hours=2))
+            per_symbol = getattr(self.news, "macro_events_for", None)
+            if ticker is not None and per_symbol is not None:
+                return await per_symbol(ticker, start, end)
+            return await self.news.get_macro_events(start, end)
         except ProviderError as exc:
             self.last_error = str(exc)
             log.warning("macro events unavailable: %s", exc)
@@ -126,8 +135,8 @@ class NewsAgent:
             self.last_error = str(exc)
             log.warning("news for %s unavailable: %s", ticker, exc)
             items = []
-        events = await self.events_window()
-        sess = self.calendar.session_for(now)
+        events = await self.events_window(ticker)
+        sess = self.router.schedule_for(ticker).session_for(now)
         bo = blackout_status(now, events, ticker, self.n.blackout_minutes_before, self.n.blackout_minutes_after,
                              sess.close if sess else None)
         recent = [i for i in items if now - i.published_at <= timedelta(hours=4)]

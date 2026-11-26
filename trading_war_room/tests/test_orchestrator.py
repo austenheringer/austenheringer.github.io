@@ -183,7 +183,7 @@ async def test_tui_renders_and_accepts_commands(cfg):
             clk.advance(timedelta(minutes=5))
         await o.handle_command("analyze NVDA")
         await pilot.pause(0.2)
-        assert app.query_one("#watch", DataTable).row_count == len(cfg.app.tickers)
+        assert app.query_one("#watch", DataTable).row_count == len(o.watch_symbols) == len(cfg.app.tickers) + 3
         assert len(app.query_one("#warroom", RichLog).lines) > 0
         await pilot.click("#cmd")
         await pilot.press(*"status", "enter")
@@ -235,3 +235,34 @@ def test_cli_smoke_test_passes(tmp_path, capsys):
     assert main.main(["--smoke-test", "--log-file", str(tmp_path / "l.log")]) == 0
     out = capsys.readouterr().out
     assert "SMOKE TEST PASSED" in out and "J.A.R.V.I.S.:" in out
+
+
+def _assert_losses_bounded(report, budget_frac=0.012):
+    """No single trade may lose much more than its risk budget (1% incl. fees, plus slippage).
+    Catches stale-bar replays, overnight gaps and sizing bugs in one invariant."""
+    from warroom.backtest.metrics import net_pnl
+
+    for t in report.trades:
+        assert net_pnl(t) >= -budget_frac * report.starting_equity, (t.ticker, t.exit_reason, net_pnl(t))
+
+
+async def test_full_equity_replay_losses_bounded(cfg):
+    from warroom.backtest.replay_engine import ReplayEngine
+
+    raw = cfg.model_dump(mode="json")
+    raw["replay"]["source"] = "mock"
+    report = await ReplayEngine(parse_config(raw), SECRETS, D, ["AAPL", "NVDA", "TSLA"]).run()
+    _assert_losses_bounded(report)
+    assert all(t.exit_reason is not None for t in report.trades)
+
+
+async def test_crypto_only_replay_runs_full_utc_day_on_weekend(cfg):
+    from warroom.backtest.replay_engine import ReplayEngine
+
+    raw = cfg.model_dump(mode="json")
+    raw["replay"]["source"] = "mock"
+    raw["replay"]["scan_every_minutes"] = 5
+    report = await ReplayEngine(parse_config(raw), SECRETS, date(2025, 1, 18), ["BTC-USD", "ETH-USD", "SOL-USD"]).run()
+    assert report.tickers == ["BTC-USD", "ETH-USD", "SOL-USD"] and report.debates >= 1
+    assert report.equity_curve[0][0].hour == 0 and report.equity_curve[-1][0].date() == date(2025, 1, 19)
+    _assert_losses_bounded(report)

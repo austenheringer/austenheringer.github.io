@@ -77,3 +77,26 @@ def test_paper_never_silently_falls_back_to_mock(cal):
         raw = yf.model_dump(mode="json")
         raw["crypto"]["data_provider"] = "mock"
         factory.build_crypto_market_data(parse_config(raw), SystemClock(), Mode.PAPER)
+
+
+def test_live_trading_cannot_be_enabled():
+    with pytest.raises(ConfigError, match="live trading is not implemented"):
+        parse_config({"execution": {"live_trading_enabled": True}})
+
+
+def test_paper_broker_implements_broker_interface(cfg, cal):
+    from warroom.core.clock import SystemClock
+    from warroom.execution.base import Broker
+    from warroom.execution.paper_broker import PaperBroker
+
+    assert isinstance(PaperBroker(cfg.execution, cfg.risk, SystemClock(), cal, 1000.0), Broker)
+
+
+@pytest.mark.parametrize("bad,needle", [
+    ({"crypto": {"symbols": ["BTCUSD"]}}, "BTC-USD"),
+    ({"crypto": {"maker_fee_pct": 0.01, "taker_fee_pct": 0.004}}, "maker_fee_pct"),
+    ({"crypto": {"symbols": ["BTC-USD"]}, "app": {"tickers": ["BTC-USD"]}}, "clash"),
+])
+def test_crypto_config_validation(bad, needle):
+    with pytest.raises(ConfigError, match=needle):
+        parse_config(bad)

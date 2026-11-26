@@ -92,9 +92,12 @@ class CryptoSection(_Section):
     max_spread_pct: float = Field(default=0.002, gt=0, le=0.05)
     allow_short: bool = False                              # spot: no shorting
     max_open_positions: int = Field(default=2, ge=0, le=20)
-    max_hold_minutes: int = Field(default=240, ge=5, le=7 * 24 * 60)
+    max_hold_minutes: int = Field(default=1440, ge=5, le=7 * 24 * 60)
+    timeframe: Literal["5m", "15m"] = "15m"                 # setup/ATR timeframe (fees demand wider stops)
     weekend_risk_multiplier: float = Field(default=0.5, ge=0, le=1)
-    range_lookback_minutes: int = Field(default=240, ge=30, le=24 * 60)
+    range_lookback_minutes: int = Field(default=720, ge=30, le=3 * 24 * 60)
+    rvol_lookback_days: int = Field(default=7, ge=1, le=7)  # Kraken serves ~7.5 days of 15m bars
+    wide_stop_pct: float = Field(default=0.04, gt=0, le=0.5)
     news_feeds: list[str] = Field(default_factory=lambda: [
         "https://www.coindesk.com/arc/outboundfeeds/rss/", "https://cointelegraph.com/rss"])
     instruments: dict[str, CryptoInstrumentSpec] = Field(default_factory=_default_crypto_instruments)

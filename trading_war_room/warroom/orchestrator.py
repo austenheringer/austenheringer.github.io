@@ -26,9 +26,9 @@ from datetime import datetime, timedelta
 from warroom.agents.jarvis_interface import JarvisInterface, PositionLine, StatusReport
 from warroom.agents.news_agent import NewsAgent
 from warroom.agents.risk_agent import PortfolioView, RiskAgent
-from warroom.agents.technical_agent import TechnicalAgent, TickerContext
+from warroom.agents.technical_agent import MacroBias, TechnicalAgent, TickerContext
 from warroom.config import AppConfig, Secrets
-from warroom.core.assets import format_price, format_qty
+from warroom.core.assets import AssetClass, AssetRouter, format_price, format_qty
 from warroom.core.clock import Clock, SystemClock, to_et
 from warroom.core.event_bus import EventBus
 from warroom.core.market_calendar import MarketCalendar, MarketStatus
@@ -82,11 +82,12 @@ class Orchestrator:
         self.speech = speech or SpeechQueue(False)
         self.notifications = notifications or NotificationHub([], [])
 
-        self.technical = TechnicalAgent(cfg, market, calendar, clock)
-        self.news = NewsAgent(cfg, news_provider, calendar, clock)
-        self.risk = RiskAgent(cfg, calendar, clock, mode)
+        self.router = AssetRouter(calendar, cfg.crypto, cfg.execution.commission_per_share)
+        self.technical = TechnicalAgent(cfg, market, calendar, clock, router=self.router)
+        self.news = NewsAgent(cfg, news_provider, calendar, clock, router=self.router)
+        self.risk = RiskAgent(cfg, calendar, clock, mode, router=self.router)
         self.broker = PaperBroker(cfg.execution, cfg.risk, clock, calendar, cfg.account.starting_cash,
-                                  db=db, risk_agent=self.risk, bus=bus)
+                                  db=db, risk_agent=self.risk, bus=bus, router=self.router)
         self.jarvis = JarvisInterface(cfg, dialogue)
         self.war_room = WarRoom(self.technical, self.news, self.risk, self.jarvis, dialogue, bus, clock,
                                 self.portfolio_view, db=db, executor=self._execute,
@@ -94,10 +95,12 @@ class Orchestrator:
         self.sod_equity = cfg.account.starting_equity
         self._sod_day = clock.now_et().date()
         self.regime = MarketRegime.UNKNOWN
+        self.crypto_regime = MarketRegime.UNKNOWN
         self.contexts: dict[str, TickerContext] = {}
         self._last_bar: dict[str, datetime] = {}
         self._standby_announced = False
         self._halt_announced = False
+        self.equities_enabled = True  # crypto-only replays switch the equity desk off
         self._bg: set[asyncio.Task] = set()
         self._closed = False
         self.cycles = 0
@@ -137,9 +140,10 @@ class Orchestrator:
         self.broker.restore(rec.cash, rec.reserved_margin, rec.open_positions)
         self.risk.state = rec.risk_state
         self.sod_equity = rec.start_of_day_equity or self.broker.equity()
+        await self._refresh_instruments(notes_out := [])
         backend = await self.speech.start()
         self.notifications.start(self.bus)
-        notes = list(getattr(self, "_startup_notes", [])) + rec.notes
+        notes = list(getattr(self, "_startup_notes", [])) + rec.notes + notes_out
         for n in notes:
             level = AlertLevel.WARNING if ("WARNING" in n or "coverage" in n or "failed" in n) else AlertLevel.INFO
             self.bus.publish(SystemAlert(timestamp=self.clock.now(), level=level, source="startup", message=n))
@@ -156,6 +160,10 @@ class Orchestrator:
         return notes
 
     # ------------------------------------------------------------------ helpers
+
+    @property
+    def watch_symbols(self) -> list[str]:
+        return (list(self.cfg.app.tickers) if self.equities_enabled else []) + list(self.router.crypto_symbols)
 
     def say(self, text: str, kind: str = "response", speak: bool = True) -> None:
         self.bus.publish(JarvisBriefing(timestamp=self.clock.now(), text=text, kind=kind, speak=speak))
@@ -181,13 +189,39 @@ class Orchestrator:
             self._standby_announced = False
             self._halt_announced = False
 
+    def _worth_debating(self, ticker: str) -> bool:
+        """Skip debates Risk would veto on hard portfolio limits alone (already holding the
+        symbol, or the relevant position cap is full). Risk still enforces these."""
+        held = self.broker.open_positions
+        if any(p.ticker == ticker for p in held) or len(held) >= self.cfg.risk.max_open_positions:
+            return False
+        if self.router.is_crypto(ticker):
+            return sum(1 for p in held if self.router.is_crypto(p.ticker)) < self.cfg.crypto.max_open_positions
+        return True
+
+    async def _refresh_instruments(self, notes: list[str]) -> None:
+        """PAPER: pull live lot sizes / minimum orders from the exchange (overrides config)."""
+        crypto = getattr(self.market, "crypto", None)
+        getter = getattr(crypto, "instruments", None)
+        if self.mode is not Mode.PAPER or getter is None or not self.router.crypto_symbols:
+            return
+        c = self.cfg.crypto
+        try:
+            for inst in await getter(self.router.crypto_symbols, c.taker_fee_pct, c.maker_fee_pct, c.allow_short):
+                self.router.set_override(inst)
+            notes.append("crypto lot sizes and minimum orders loaded from Kraken")
+        except ProviderError as exc:
+            notes.append(f"WARNING: could not load Kraken instrument specs ({exc}); using config defaults")
+
     async def _execute(self, plan: TradePlan, ctx: TickerContext) -> None:
         q = ctx.quote
         try:
             fill = await self.broker.open_from_plan(plan, q.bid if q else None, q.ask if q else None, ctx.snapshot.price)
         except OrderRejected as exc:
             raise RuntimeError(f"order rejected: {exc}") from exc
-        self._last_bar.setdefault(plan.ticker, ctx.last_bar_close - timedelta(minutes=1))
+        # Reset (never setdefault): a bookmark left over from an earlier trade in this symbol would
+        # replay pre-entry bars against the new position and fire its stop on stale prices.
+        self._last_bar[plan.ticker] = ctx.last_bar_close - timedelta(minutes=1)
         log.info("paper entry %s %s %d @ %.2f", plan.ticker, plan.direction.value, fill.qty, fill.price)
 
     # ------------------------------------------------------------------ the cycle
@@ -205,45 +239,66 @@ class Orchestrator:
                 log.warning("bars for %s unavailable: %s", ticker, exc)
                 continue
             for ts, row in bars.iterrows():
-                fills += len(await self.broker.on_bar(ticker, Bar(row.open, row.high, row.low, row.close)))
+                fills += len(await self.broker.on_bar(ticker, Bar(row.open, row.high, row.low, row.close),
+                                                      bar_time=ts.to_pydatetime()))
                 self._last_bar[ticker] = ts.to_pydatetime()
                 if not self.broker.position_for(ticker):
                     break
         return fills
 
     async def run_cycle(self) -> CycleResult:
+        """One scan/execute cycle across both desks: equities (market hours; standby in
+        PAPER when the exchange is closed) and crypto (24/7)."""
         self.cycles += 1
         self._roll_day()
         now = self.clock.now()
         res = CycleResult(at=now)
         status = self.calendar.status(now)
-        if self.mode is Mode.PAPER and status is not MarketStatus.OPEN:
-            if self.broker.open_positions and self.calendar.session_for(now) is None:
-                await self.broker.flatten_all(ExitReason.EOD_FLAT)
+        equities_open = self.equities_enabled and (self.mode is not Mode.PAPER or status is MarketStatus.OPEN)
+        if self.equities_enabled and not equities_open:
+            equity_pos = [p for p in self.broker.open_positions if not self.router.is_crypto(p.ticker)]
+            if equity_pos and self.calendar.session_for(now) is None:
+                await self.broker.flatten_all(ExitReason.EOD_FLAT,
+                                              symbols={p.ticker for p in equity_pos})
             if not self._standby_announced:
                 nxt = self.calendar.next_session(now)
-                self.say(f"Markets are {status.value.lower().replace('_', '-')}, {self.cfg.app.user_title}. Standing by "
-                         f"until {to_et(nxt.open):%A %H:%M} ET.", speak=False)
+                crypto_note = " The crypto desk remains open." if self.router.crypto_symbols else ""
+                self.say(f"Equity markets are {status.value.lower().replace('_', '-')}, {self.cfg.app.user_title}. "
+                         f"Standing by until {to_et(nxt.open):%A %H:%M} ET.{crypto_note}", speak=False)
                 self._standby_announced = True
             res.standby = True
-            return res
-        self._standby_announced = False
+        else:
+            self._standby_announced = False
 
         res.fills += await self._feed_bars()
 
-        tickers = self.cfg.app.tickers
-        built = await asyncio.gather(*(self.technical.build_context(t) for t in tickers), return_exceptions=True)
+        symbols = (list(self.cfg.app.tickers) if equities_open else []) + list(self.router.crypto_symbols)
+        if not symbols:
+            return res
+        built = await asyncio.gather(*(self.technical.build_context(t) for t in symbols), return_exceptions=True)
         contexts = [c for c in built if isinstance(c, TickerContext)]
-        self.contexts = {c.ticker: c for c in contexts}
-        bias = await self.technical.macro_bias()
-        self.regime = bias.regime
-        prices = {c.ticker: c.snapshot.price for c in contexts}
-        self.broker.mark(prices)
+        self.contexts.update({c.ticker: c for c in contexts})
+        eq_ctx = [c for c in contexts if not c.is_crypto]
+        cr_ctx = [c for c in contexts if c.is_crypto]
+        biases: dict[AssetClass, MacroBias] = {}
+        if eq_ctx:
+            biases[AssetClass.EQUITY] = await self.technical.macro_bias(AssetClass.EQUITY)
+            self.regime = biases[AssetClass.EQUITY].regime
+        if cr_ctx:
+            biases[AssetClass.CRYPTO] = await self.technical.macro_bias(AssetClass.CRYPTO)
+            self.crypto_regime = biases[AssetClass.CRYPTO].regime
+        self.broker.mark({c.ticker: c.snapshot.price for c in contexts})
         for c in contexts:
-            self.bus.publish(MarketUpdate(timestamp=now, ticker=c.ticker, price=c.snapshot.price,
-                                          snapshot=c.snapshot, regime=bias.regime))
+            self.bus.publish(MarketUpdate(timestamp=now, ticker=c.ticker, price=c.snapshot.price, snapshot=c.snapshot,
+                                          regime=biases[c.asset_class].regime))
 
-        for setup, ctx in self.technical.scan_contexts(contexts, bias)[: self.cfg.app.max_debates_per_cycle]:
+        candidates = []
+        for cls, group in ((AssetClass.EQUITY, eq_ctx), (AssetClass.CRYPTO, cr_ctx)):
+            if group:
+                candidates += [(st, ctx, biases[cls]) for st, ctx in self.technical.scan_contexts(group, biases[cls])]
+        candidates = [c for c in candidates if self._worth_debating(c[0].ticker)]
+        candidates.sort(key=lambda x: x[0].confidence, reverse=True)
+        for setup, ctx, bias in candidates[: self.cfg.app.max_debates_per_cycle]:
             t = await self.war_room.convene(setup, ctx, bias)
             res.debates.append(t)
             if t.plan.status.value != "VETOED" or setup.on_demand:
@@ -284,12 +339,13 @@ class Orchestrator:
                               p.last_price, round(p.unrealized_pnl(), 2)) for p in self.broker.open_positions]
         return StatusReport(mode=self.mode.value, equity=round(eq, 2), day_pnl=round(day_pnl, 2),
                             day_pnl_pct=day_pnl / self.sod_equity if self.sod_equity else 0.0, regime=self.regime,
+                            crypto_regime=self.crypto_regime if self.router.crypto_symbols else None,
                             circuit=self.risk.circuit_status(), positions=lines, llm=self.dialogue.active_provider,
                             voice=self.speech.backend_name, market_status=self.calendar.status(self.clock.now()).value)
 
     async def analyze(self, ticker: str) -> WarRoomTranscript | str:
-        ticker = ticker.upper()
-        bias = await self.technical.macro_bias()
+        ticker = self.router.normalize(ticker)
+        bias = await self.technical.macro_bias(self.router.asset_class(ticker))
         res = await self.technical.analyze(ticker, bias)
         if res is None:
             return f"I'm afraid I have no market data for {ticker}, {self.cfg.app.user_title}."
@@ -299,7 +355,8 @@ class Orchestrator:
     async def latest_transcript(self, ticker: str | None) -> WarRoomTranscript | None:
         if ticker is None:
             return self.war_room.last_transcript or await self.db.latest_transcript(None)
-        return self.war_room.transcripts.get(ticker.upper()) or await self.db.latest_transcript(ticker)
+        ticker = self.router.normalize(ticker)
+        return self.war_room.transcripts.get(ticker) or await self.db.latest_transcript(ticker)
 
     def pause(self) -> None:
         self.risk.pause()

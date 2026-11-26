@@ -30,7 +30,7 @@ import pandas as pd
 
 from warroom.config import HttpSection
 from warroom.core.assets import AssetClass, AssetRouter, Instrument
-from warroom.core.clock import UTC, Clock, ensure_utc, et_to_utc
+from warroom.core.clock import UTC, Clock, ensure_utc
 from warroom.models.schemas import MacroEvent, MacroEventKind, NewsItem, Quote, Severity, Timeframe
 from warroom.providers.base import (
     MarketDataProvider,
@@ -212,7 +212,11 @@ def generate_crypto_day(seed: int, symbol: str, day: date) -> pd.DataFrame:
         vmult[k:k + 6] = 6.0
         drift[k + 6:k + 120] = -0.3 * vol
     rets += drift
-    close = anchor * np.exp(np.cumsum(rets))
+    log_path = np.log(anchor) + np.cumsum(rets)
+    # Bridge to the next day's anchor so 00:00 UTC is continuous: a 24/7 market has no overnight gap.
+    next_anchor = ref * float(np.exp(sum(_cshock(seed, symbol, day.toordinal() + 1 - k) for k in range(30))))
+    log_path += (np.log(next_anchor) - log_path[-1]) * (t + 1) / 1440
+    close = np.exp(log_path)
     open_ = np.concatenate([[anchor], close[:-1]])
     high = np.maximum(open_, close) * (1 + np.abs(rng.normal(0, vol * 0.6, 1440)))
     low = np.minimum(open_, close) * (1 - np.abs(rng.normal(0, vol * 0.6, 1440)))

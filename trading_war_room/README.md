@@ -1,6 +1,6 @@
 # Trading War Room
 
-A multi-agent day-trading **analysis, risk-management and paper-trading** system. Three agents
+A multi-agent **stocks + crypto** day-trading **analysis, risk-management and paper-trading** system. Three agents
 (Technical, News, Risk) debate every setup in a live **Agent War Room**, Risk holds an absolute
 veto, and a **J.A.R.V.I.S.**-style strategist briefs you in plain English (and, optionally, out
 loud in a British voice).
@@ -22,7 +22,7 @@ pip install -e ".[dev]"                                 # core + pytest (no API 
 
 python main.py --smoke-test        # 3 headless cycles; prints SMOKE TEST PASSED, exit 0
 python main.py --demo              # full TUI on synthetic data, zero keys
-pytest -q                          # 233 tests, no network
+pytest -q                          # 273 tests, no network
 ```
 
 `--demo` replays the most recent trading session (from 09:50 ET, 10x speed) on deterministic
@@ -43,6 +43,43 @@ degrades gracefully without it.
 
 ---
 
+## Crypto desk (24/7, Kraken)
+
+Crypto runs alongside stocks in the same account, under the same portfolio-wide limits. Stocks stand by
+when the exchange closes; the crypto desk keeps trading nights, weekends and holidays.
+
+| | Stocks | Crypto |
+|---|---|---|
+| Data | Alpaca / yfinance / mock | **Kraken public API (free, no keys)** / mock |
+| Hours | NYSE session, holidays, 15:55 flat | 24/7. Each UTC day anchors VWAP and prior-day levels; **24h time stop** instead of an EOD flat |
+| Setups | ORB, VWAP, EMA pullback, RVOL momentum (5m) | **12h range breakout**, VWAP, EMA pullback, RVOL momentum (**15m**, 1h trend) |
+| Trend bias | SPY/QQQ | BTC |
+| Size | whole shares | fractional, in Kraken lot steps; Kraken minimum orders enforced |
+| Costs | per-share commission | **0.40% taker / 0.25% maker**; R:R and size are computed **after fees** |
+| Shorting | allowed | **off** (spot account); short setups are never proposed |
+| Extra limits | PDT tracker | max 2 crypto positions, **half risk on weekends**, wider-spread veto (0.20%) |
+| Blackouts | macro, earnings, halts | macro releases (CPI at 08:30 ET lands mid-session for crypto), **Kraken maintenance status** |
+
+**Why 15-minute bars:** at Kraken's base fees a round trip costs about 0.65%, while a 5-minute BTC
+stop is only 0.2–0.4% away. On 5m bars the fees would cost more than the entire risk, and every trade
+would lose money net. On 15m bars the stops sit about 1–2% away, and targets are placed so each trade
+still pays 2R **after** fees.
+
+Try it with `python main.py --demo` (the crypto rows sit in the same watchlist), or ask
+J.A.R.V.I.S. `analyze BTC` / `why ETH`. To replay a crypto day (crypto has no holidays, so any date
+works):
+
+```bash
+python main.py --replay 2025-01-18 --tickers BTC-USD,ETH-USD,SOL-USD --replay-source mock
+```
+
+**Real money: not yet.** The system stays paper-only. [`docs/LIVE_TRADING_PLAN.md`](docs/LIVE_TRADING_PLAN.md)
+sets the evidence a small, capped real-money mode must meet first (8+ weeks and 100+ paper trades, net
+positive after fees) and the safety design it requires: a trade-only API key, stops resting on the
+exchange, hard caps and reconciliation.
+
+---
+
 ## Modes
 
 | Command | What it does |
@@ -53,7 +90,7 @@ degrades gracefully without it.
 | `python main.py --replay 2025-01-15 --tickers AAPL,NVDA,TSLA` | Minute-by-minute replay through the *same* pipeline; prints trades, win rate, profit factor, max drawdown, total P&L |
 | `python main.py --replay 2025-01-15 --replay-source mock` | Replay on the synthetic tape (no data needed) |
 | `python main.py --smoke-test` | 3 headless cycles; exit 0 if a full debate + briefing succeed |
-| `python main.py --check-providers` | Live checks of your configured providers and keys (bars, quotes, news, Fed/BLS calendar, halt feed, LLM) |
+| `python main.py --check-providers` | Live checks of your configured providers and keys (bars, quotes, news, Fed/BLS calendar, halt feed, Kraken bars/quote/status/lot sizes, LLM) |
 
 Add `--headless` to `--demo` / `--paper` to stream events to the console instead of the TUI.
 Each mode uses its own database (`data/trades_demo.db`, `data/trades_paper.db`); replay and smoke
@@ -199,7 +236,7 @@ only. The report states both assumptions.
 ## Development
 
 ```bash
-pytest -q                       # full suite, ~35s, no network
+pytest -q                       # full suite, ~3 min (includes full-day replays), no network
 python main.py --smoke-test     # end-to-end pipeline check
 ```
 

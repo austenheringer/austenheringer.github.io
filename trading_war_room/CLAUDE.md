@@ -33,7 +33,8 @@ warroom/
   models/schemas.py          ALL domain models + event types + validate_levels()
   core/clock.py              Clock, SystemClock (--paper), DemoClock (--demo), SimulatedClock (--replay/tests)
   core/event_bus.py          typed non-blocking async pub/sub
-  core/market_calendar.py    NYSE holidays, early closes, sessions (ORB end, EOD flat)
+  core/market_calendar.py    NYSE holidays, early closes, sessions (ORB end, EOD flat; eod_flat=None for crypto)
+  core/assets.py             AssetClass, Instrument (lot step/min order/fees), CryptoSchedule (24/7), AssetRouter
   providers/base.py          MarketDataProvider / NewsProvider / LLMProvider + bar helpers
   providers/http.py          RetryingHttpClient (429/5xx backoff + full jitter, Retry-After)
   providers/market_data.py   Mock (deterministic scenarios), yfinance, Alpaca REST
@@ -43,6 +44,7 @@ warroom/
   providers/healthcheck.py   live contract checks (`main.py --check-providers`)
   analysis/indicators.py     pure vectorised EMA/RSI(Wilder)/ATR/VWAP/ORB/premarket/PDH-PDL/RVOL/swings
   providers/llm_provider.py  DialogueEngine (rewrite-only, number guard, daily cap) + Anthropic/OpenAI/RuleBased
+  providers/crypto_data.py   Kraken public REST, MockCryptoProvider (24/7, bridged days), crypto RSS, Routed* providers
   providers/factory.py       builds providers per mode (DEMO/SMOKE force mocks; PAPER never silently falls back)
   storage/database.py        SQLite (WAL, serialized writes) + startup state recovery
   agents/technical_agent.py  TickerContext, macro bias, LONG/SHORT setups, cooldown gate, halt inference
@@ -51,7 +53,8 @@ warroom/
   agents/jarvis_interface.py command parser, briefings, status/why/transcript, JarvisContext protocol
   war_room.py                3-round debate; per-ticker lock + global portfolio lock around vote+execution
   orchestrator.py            build()/start()/run_cycle()/run_forever()/shutdown(); implements JarvisContext
-  execution/paper_broker.py  simulated fills, SL / TP1 (50% + BE) / TP2 / EOD flat
+  execution/base.py          Broker protocol (PaperBroker is the only implementation)
+  execution/paper_broker.py  simulated fills, SL / TP1 (50% + BE) / TP2 / EOD flat (equities) / time stop (crypto)
   backtest/replay_engine.py  SimulatedClock replay through the real Orchestrator (csv/alpaca/yfinance/mock)
   backtest/metrics.py        ReplayReport, profit factor, max drawdown
   dashboard/tui_app.py       Textual UI (bus subscriber); tested headlessly via App.run_test()
@@ -87,6 +90,15 @@ tests/
     OR-ed in (a restart can only make the system more cautious).
 12. Bars travel as pandas DataFrames (UTC index of bar open times, columns open/high/low/close/volume),
     normalised by `providers.base.normalize_bars`.
+
+13. **Quantities are floats.** Always round sizes DOWN with `Instrument.floor_qty` (lot step: 1 share,
+    1e-8 BTC) and check `Instrument.meets_minimum`. Print with `format_qty` / `format_price`.
+14. **Crypto R:R, sizing and targets are net of fees** (`FeeModel`, `risk_per_unit`, `fee_aware_target`).
+    With zero commission the math reduces exactly to the equity formulas.
+15. **No real-money execution.** `execution.live_trading_enabled` is rejected by config validation;
+    see docs/LIVE_TRADING_PLAN.md before touching `execution/`.
+16. Invariant test: no replayed trade may lose much more than its risk budget
+    (`_assert_losses_bounded`). Keep it green; it caught the stale-bar and overnight-gap bugs.
 
 ## Risk policy decisions (config `risk.*`)
 

@@ -430,9 +430,10 @@ class CsvDataProvider(MarketDataProvider):
         now = self.clock.now()
         start = ensure_utc(start)
         end = min(ensure_utc(end), now) if end else now
+        # files may be keyed by ET (equities) or UTC (crypto) date: scan one day either side
         frames = []
-        d = to_et(start).date()
-        while d <= to_et(end).date():
+        d = start.date() - timedelta(days=1)
+        while d <= end.date() + timedelta(days=1):
             df = self._day(ticker, d)
             if not df.empty:
                 frames.append(df)
@@ -440,13 +441,16 @@ class CsvDataProvider(MarketDataProvider):
         if not frames:
             return empty_bars()
         df = pd.concat(frames)
+        df = df[~df.index.duplicated(keep="last")].sort_index()
         df = df[(df.index >= pd.Timestamp(start)) & (df.index <= pd.Timestamp(end))]
         df = resample_bars(completed_only(df, Timeframe.M1, now), timeframe)
         return completed_only(df, timeframe, now)
 
     async def get_quote(self, ticker: str) -> Quote | None:
         now = self.clock.now()
-        df = completed_only(self._day(ticker, to_et(now).date()), Timeframe.M1, now)
+        frames = [self._day(ticker, d) for d in (now.date() - timedelta(days=1), now.date(), to_et(now).date())]
+        frames = [f for f in frames if not f.empty]
+        df = completed_only(pd.concat(frames).sort_index(), Timeframe.M1, now) if frames else empty_bars()
         if df.empty:
             return None
         last = float(df["close"].iloc[-1])

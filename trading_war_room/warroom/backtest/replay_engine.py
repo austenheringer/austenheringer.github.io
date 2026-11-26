@@ -30,6 +30,8 @@ from warroom.models.schemas import Mode, PlanStatus, Quote, Timeframe
 from warroom.orchestrator import Orchestrator
 from warroom.providers import factory
 from warroom.providers.base import MarketDataProvider, ProviderUnavailable, completed_only
+from warroom.core.assets import CRYPTO_SYMBOL_RE, AssetRouter, CryptoSchedule
+from warroom.providers.crypto_data import MockCryptoProvider, RoutedMarketData
 from warroom.providers.market_data import AlpacaDataProvider, CsvDataProvider, MockDataProvider, YFinanceDataProvider
 
 
@@ -77,20 +79,38 @@ class SyntheticQuoteAdapter(MarketDataProvider):
 
 
 def replay_config(cfg: AppConfig, tickers: list[str] | None) -> AppConfig:
+    """Apply --tickers: crypto pairs (BTC-USD) go to the crypto desk, the rest to equities.
+    Naming only one asset class replays only that desk."""
     raw = cfg.model_dump(mode="json")
     if tickers:
-        raw["app"]["tickers"] = [t for t in tickers if t not in raw["app"]["macro_tickers"]]
+        crypto = [t for t in tickers if CRYPTO_SYMBOL_RE.match(t)]
+        equities = [t for t in tickers if not CRYPTO_SYMBOL_RE.match(t) and t not in raw["app"]["macro_tickers"]]
+        raw["crypto"]["symbols"] = crypto
+        raw["crypto"]["enabled"] = bool(crypto)
+        if crypto and raw["crypto"]["macro_symbol"] not in crypto:
+            raw["crypto"]["macro_symbol"] = crypto[0] if "BTC-USD" not in crypto else "BTC-USD"
+        raw["app"]["tickers"] = equities or raw["app"]["tickers"]
+        raw["_equities_off"] = not equities
+    equities_off = raw.pop("_equities_off", False)
     raw["account"]["starting_equity"] = cfg.replay.starting_equity
     raw["account"]["starting_cash"] = cfg.replay.starting_equity
     raw["notifications"]["discord_enabled"] = False
     raw["notifications"]["telegram_enabled"] = False
-    return parse_config(raw, source="replay overrides")
+    out = parse_config(raw, source="replay overrides")
+    object.__setattr__(out, "_equities_off", equities_off)
+    return out
+
+
+def equities_off(cfg: AppConfig) -> bool:
+    return bool(getattr(cfg, "_equities_off", False))
 
 
 def resolve_source(cfg: AppConfig, secrets: Secrets, day: date, clock: Clock) -> tuple[MarketDataProvider, str]:
     src = cfg.replay.source
     calendar = factory.build_calendar(cfg)
-    symbols = cfg.app.tickers + cfg.app.macro_tickers
+    symbols = ([] if equities_off(cfg) else cfg.app.tickers + cfg.app.macro_tickers)
+    if cfg.crypto.enabled:
+        symbols += [s for s in cfg.crypto.symbols + [cfg.crypto.macro_symbol] if s not in symbols]
     tried: list[str] = []
 
     def csv():
@@ -118,7 +138,11 @@ def resolve_source(cfg: AppConfig, secrets: Secrets, day: date, clock: Clock) ->
         return SyntheticQuoteAdapter(inner, clock, cfg.replay.assumed_spread_pct), "yfinance"
 
     def mock():
-        return MockDataProvider(clock, calendar, seed=cfg.providers.mock_seed), "mock (synthetic)"
+        equity = MockDataProvider(clock, calendar, seed=cfg.providers.mock_seed)
+        if cfg.crypto.enabled and cfg.crypto.symbols:
+            router = AssetRouter(calendar, cfg.crypto)
+            return RoutedMarketData(router, equity, MockCryptoProvider(clock, seed=cfg.providers.mock_seed)), "mock (synthetic)"
+        return equity, "mock (synthetic)"
 
     order = {"csv": [csv], "alpaca": [alpaca], "yfinance": [yfin], "mock": [mock], "auto": [csv, alpaca, yfin]}[src]
     for fn in order:
@@ -140,14 +164,22 @@ class ReplayEngine:
 
     async def run(self, progress=None, max_minutes: int | None = None) -> ReplayReport:
         """Replay the session. ``max_minutes`` truncates the run (tests / quick looks)."""
-        sess = self.calendar.session(self.day)
-        if sess is None:
-            raise ReplayDataUnavailable(f"{self.day} is not a trading day "
-                                        f"({self.calendar.holiday_name(self.day) or 'weekend'})")
+        crypto_only = equities_off(self.cfg)
+        if crypto_only:
+            sess = CryptoSchedule().session(self.day)  # the full UTC day; crypto has no holidays
+        else:
+            sess = self.calendar.session(self.day)
+            if sess is None:
+                raise ReplayDataUnavailable(f"{self.day} is not a trading day "
+                                            f"({self.calendar.holiday_name(self.day) or 'weekend'}); "
+                                            "crypto-only replays (--tickers BTC-USD,...) run on any day")
         clock = SimulatedClock(sess.open + timedelta(minutes=1))
         market, source = resolve_source(self.cfg, self.secrets, self.day, clock)
-        orch = await Orchestrator.build(self.cfg, self.secrets, Mode.REPLAY, clock=clock, db_path=":memory:",
+        cfg = self.cfg
+        orch = await Orchestrator.build(cfg, self.secrets, Mode.REPLAY, clock=clock, db_path=":memory:",
                                         market=market)
+        if crypto_only:
+            orch.equities_enabled = False
         await orch.start()
         start_equity = orch.broker.equity()
         curve: list[tuple[datetime, float]] = [(clock.now(), start_equity)]
@@ -170,7 +202,8 @@ class ReplayEngine:
                 closed.extend(p for p in orch.broker.closed_today if p not in closed)
             history = list(orch.war_room.history)
             report = ReplayReport(
-                day=self.day, tickers=self.cfg.app.tickers, source=source, starting_equity=start_equity,
+                day=self.day, tickers=(([] if crypto_only else self.cfg.app.tickers) + list(self.cfg.crypto.symbols
+                                       if self.cfg.crypto.enabled else [])), source=source, starting_equity=start_equity,
                 ending_equity=round(orch.broker.equity(), 2), trades=closed, equity_curve=curve,
                 debates=len(history),
                 approved=sum(t.plan.status is PlanStatus.APPROVED for t in history),

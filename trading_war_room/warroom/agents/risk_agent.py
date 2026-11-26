@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
 from warroom.config import AppConfig
+from warroom.core.assets import AssetRouter, format_qty
 from warroom.core.clock import Clock, et_to_utc, to_et
 from warroom.core.market_calendar import MarketCalendar
 from warroom.models.schemas import (
@@ -78,6 +79,46 @@ def compute_stop(direction: Direction, entry: float, atr: float, structural: flo
     return StopResult(stop=stop, source=source, atr_multiple=abs(entry - stop) / atr)
 
 
+@dataclass(frozen=True)
+class FeeModel:
+    """Trading costs. ``taker_pct`` applies to market orders (entry, stop, flatten),
+    ``maker_pct`` to resting limit targets, ``per_unit`` is a per-share commission."""
+
+    taker_pct: float = 0.0
+    maker_pct: float = 0.0
+    per_unit: float = 0.0
+
+    @property
+    def free(self) -> bool:
+        return self.taker_pct == 0 and self.maker_pct == 0 and self.per_unit == 0
+
+
+def risk_per_unit(entry: float, stop: float, fees: FeeModel | None = None) -> float:
+    """Loss per unit if stopped: price distance + entry fee + stop (market) fee."""
+    f = fees or FeeModel()
+    return abs(entry - stop) + entry * f.taker_pct + stop * f.taker_pct + 2 * f.per_unit
+
+
+def net_reward(direction: Direction, entry: float, target: float, fees: FeeModel | None = None) -> float:
+    """Gain per unit at a limit target after the entry (taker) and target (maker) fees."""
+    f = fees or FeeModel()
+    return (target - entry) * direction.sign - entry * f.taker_pct - target * f.maker_pct - 2 * f.per_unit
+
+
+def net_reward_risk(direction: Direction, entry: float, stop: float, target: float, fees: FeeModel | None = None) -> float:
+    r = risk_per_unit(entry, stop, fees)
+    return net_reward(direction, entry, target, fees) / r if r > 0 else 0.0
+
+
+def fee_aware_target(direction: Direction, entry: float, stop: float, k: float, fees: FeeModel | None = None) -> float:
+    """Price at which the NET reward equals ``k`` x the NET risk."""
+    f = fees or FeeModel()
+    want = k * risk_per_unit(entry, stop, f) + 2 * f.per_unit
+    if direction is Direction.LONG:
+        return (entry * (1 + f.taker_pct) + want) / (1 - f.maker_pct)
+    return (entry * (1 - f.taker_pct) - want) / (1 + f.maker_pct)
+
+
 @dataclass
 class TargetResult:
     tp1: float
@@ -86,11 +127,16 @@ class TargetResult:
 
 
 def compute_targets(direction: Direction, entry: float, stop: float, tp1_r: float, tp2_r: float,
-                    levels: dict[str, float | None], atr: float, policy: str = "structural_cap") -> TargetResult:
-    """R-multiple targets, optionally capped just before opposing structure."""
+                    levels: dict[str, float | None], atr: float, policy: str = "structural_cap",
+                    fees: FeeModel | None = None) -> TargetResult:
+    """R-multiple targets (net of fees when a FeeModel is given), optionally capped
+    just before opposing structure."""
     s = direction.sign
     r = abs(entry - stop)
-    tp1, tp2 = entry + s * tp1_r * r, entry + s * tp2_r * r
+    if fees is None or fees.free:
+        tp1, tp2 = entry + s * tp1_r * r, entry + s * tp2_r * r
+    else:
+        tp1, tp2 = fee_aware_target(direction, entry, stop, tp1_r, fees), fee_aware_target(direction, entry, stop, tp2_r, fees)
     capped: list[str] = []
     if policy == "structural_cap":
         front_run = 0.05 * atr  # exit slightly before the level, where offers/bids stack
@@ -117,14 +163,25 @@ def compute_targets(direction: Direction, entry: float, stop: float, tp1_r: floa
 
 
 def position_size(equity: float, available_cash: float, entry: float, stop: float, max_risk_pct: float,
-                  max_position_pct: float) -> tuple[int, int, int]:
-    """(risk_shares, buying_power_shares, position_size). Zero distance -> zeros."""
+                  max_position_pct: float, *, per_unit_risk: float | None = None,
+                  entry_cost: float | None = None) -> tuple[float, float, float]:
+    """(risk_units, buying_power_units, position_size). Zero distance -> zeros.
+
+    Defaults are the spec's whole-share formulas:
+      risk_shares = floor(equity * max_risk_pct / |entry - stop|)
+      buying_power_shares = floor(cash * max_position_pct / entry)
+    ``per_unit_risk`` / ``entry_cost`` switch to fee-inclusive, unfloored values; the
+    caller then rounds down to the instrument's lot step (fractional for crypto)."""
     dist = abs(entry - stop)
     if dist <= 0 or entry <= 0 or equity <= 0:
         return 0, 0, 0
-    risk_shares = math.floor((equity * max_risk_pct) / dist)
-    bp_shares = math.floor((max(0.0, available_cash) * max_position_pct) / entry)
-    return risk_shares, bp_shares, max(0, min(risk_shares, bp_shares))
+    if per_unit_risk is None and entry_cost is None:
+        risk_shares = math.floor((equity * max_risk_pct) / dist)
+        bp_shares = math.floor((max(0.0, available_cash) * max_position_pct) / entry)
+        return risk_shares, bp_shares, max(0, min(risk_shares, bp_shares))
+    risk_units = (equity * max_risk_pct) / (per_unit_risk or dist)
+    bp_units = (max(0.0, available_cash) * max_position_pct) / (entry_cost or entry)
+    return risk_units, bp_units, max(0.0, min(risk_units, bp_units))
 
 
 def reward_risk(direction: Direction, entry: float, stop: float, target: float) -> float:
@@ -163,8 +220,9 @@ class RiskNotes:
 
 class RiskAgent:
     def __init__(self, cfg: AppConfig, calendar: MarketCalendar, clock: Clock, mode: Mode,
-                 state: RiskState | None = None) -> None:
+                 state: RiskState | None = None, router: AssetRouter | None = None) -> None:
         self.cfg = cfg
+        self.router = router or AssetRouter(calendar, cfg.crypto)
         self.r = cfg.risk
         self.calendar = calendar
         self.clock = clock
@@ -201,7 +259,8 @@ class RiskAgent:
                 self.state.cooldown_until = (p.closed_at or now) + timedelta(minutes=self.r.consecutive_loss_cooldown_minutes)
         else:
             self.state.consecutive_losses = 0
-        if p.closed_at and to_et(p.opened_at).date() == to_et(p.closed_at).date():
+        # PDT is an equities rule: crypto round trips do not count
+        if p.closed_at and not self.router.is_crypto(p.ticker) and to_et(p.opened_at).date() == to_et(p.closed_at).date():
             self.state.day_trade_dates = [*self.state.day_trade_dates, to_et(p.closed_at).date()]
 
     def pause(self) -> None:
@@ -272,16 +331,35 @@ class RiskAgent:
                 vetoes.append(f"PDT rule: {n} day trades in the last 5 sessions with equity "
                               f"${portfolio.equity:,.0f} < ${self.r.pdt_equity_threshold:,.0f}")
 
-        # ---- session timing
-        sess = ctx.session
-        cutoff_h, cutoff_m = map(int, self.cfg.technical.no_new_entries_after_et.split(":"))
-        cutoff = min(et_to_utc(datetime.combine(sess.day, time(cutoff_h, cutoff_m))), sess.eod_flat)
-        if not sess.contains(now):
-            vetoes.append("market is closed")
-        elif now < sess.orb_end:
-            vetoes.append(f"inside the opening-range window (until {to_et(sess.orb_end):%H:%M} ET)")
-        elif now >= cutoff:
-            vetoes.append(f"past the {to_et(cutoff):%H:%M} ET cutoff for new entries")
+        inst = ctx.instrument or self.router.instrument(setup.ticker, snap.price)
+        is_crypto = inst.is_crypto
+        risk_pct = self.r.max_risk_pct
+
+        # ---- asset-class guards
+        if is_crypto:
+            c = self.cfg.crypto
+            if d is Direction.SHORT and not inst.allow_short:
+                vetoes.append(f"short selling is not available for {setup.ticker} on a spot account (crypto.allow_short=false)")
+            n_crypto = sum(1 for p in open_pos if self.router.is_crypto(p.ticker))
+            if n_crypto >= c.max_open_positions:
+                vetoes.append(f"max concurrent crypto positions reached ({n_crypto}/{c.max_open_positions})")
+            if now.weekday() >= 5 and c.weekend_risk_multiplier < 1:
+                risk_pct *= c.weekend_risk_multiplier
+                warns.append(f"weekend: risk per trade cut to {risk_pct:.2%} (thinner order books)")
+
+        # ---- session timing (equities only: crypto never closes)
+        if not is_crypto:
+            sess = ctx.session
+            cutoff_h, cutoff_m = map(int, self.cfg.technical.no_new_entries_after_et.split(":"))
+            cutoff = et_to_utc(datetime.combine(sess.day, time(cutoff_h, cutoff_m)))
+            if sess.eod_flat is not None:
+                cutoff = min(cutoff, sess.eod_flat)
+            if not sess.contains(now):
+                vetoes.append("market is closed")
+            elif now < sess.orb_end:
+                vetoes.append(f"inside the opening-range window (until {to_et(sess.orb_end):%H:%M} ET)")
+            elif now >= cutoff:
+                vetoes.append(f"past the {to_et(cutoff):%H:%M} ET cutoff for new entries")
 
         # ---- data quality
         age = ctx.data_age_seconds(now)
@@ -291,9 +369,10 @@ class RiskAgent:
             if getattr(ctx, "possible_halt", False):
                 msg += "; peers are current, so the symbol may be halted"
             vetoes.append(msg)
+        max_spread = self.cfg.crypto.max_spread_pct if is_crypto else self.r.max_spread_pct
         if ctx.has_real_quotes and ctx.quote is not None:
-            if ctx.quote.spread_pct > self.r.max_spread_pct:
-                vetoes.append(f"spread {ctx.quote.spread_pct:.3%} exceeds {self.r.max_spread_pct:.3%}")
+            if ctx.quote.spread_pct > max_spread:
+                vetoes.append(f"spread {ctx.quote.spread_pct:.3%} exceeds {max_spread:.3%}")
         elif self.r.unknown_spread_policy == "veto":
             vetoes.append("no real bid/ask available: spread cannot be verified (risk.unknown_spread_policy=veto)")
         else:
@@ -311,7 +390,9 @@ class RiskAgent:
         if not setup.qualified:
             warns.append("no qualified technical trigger")
 
-        # ---- levels
+        # ---- levels (fee-aware)
+        fees = FeeModel(inst.taker_fee_pct, inst.maker_fee_pct,
+                        0.0 if is_crypto else self.cfg.execution.commission_per_share)
         atr = snap.atr14 or 0.0
         if ctx.has_real_quotes and ctx.quote is not None:
             ref = ctx.quote.ask if d is Direction.LONG else ctx.quote.bid
@@ -319,30 +400,32 @@ class RiskAgent:
         else:
             ref = snap.price
             notes.entry_basis = "last"
-        entry = ref * (1 + s * self.cfg.execution.slippage_pct)
-        entry_r = round(entry, 2)
+        entry_r = inst.round_price(ref * (1 + s * self.cfg.execution.slippage_pct))
         stop = tp1 = tp2 = None
         rr = None
-        risk_sh = bp_sh = size = 0
+        risk_sh = bp_sh = size = 0.0
         dollar_risk = 0.0
         if atr <= 0:
             vetoes.append("ATR unavailable: cannot place a volatility-based stop")
         else:
             structural = snap.swing_low if d is Direction.LONG else snap.swing_high
-            st = compute_stop(d, entry, atr, structural, self.r.atr_stop_multiplier, self.r.stop_buffer_atr,
+            st = compute_stop(d, entry_r, atr, structural, self.r.atr_stop_multiplier, self.r.stop_buffer_atr,
                               self.r.min_stop_atr, self.r.stop_policy)
             notes.stop_source, notes.stop_atr_multiple = st.source, round(st.atr_multiple, 2)
-            stop_r = round(st.stop, 2)
+            stop = inst.round_price(st.stop)
             # Only levels established BEFORE the signal count as opposing structure. The recent
-            # swing high/low is excluded: after a breakout it is the bar that just broke out.
-            levels = (
-                {"prior-day high": ctx.prior_high, "premarket high": snap.premarket_high, "ORB high": snap.orb_high}
-                if d is Direction.LONG else
-                {"prior-day low": ctx.prior_low, "premarket low": snap.premarket_low, "ORB low": snap.orb_low}
-            )
-            tg = compute_targets(d, entry_r, stop_r, self.r.tp1_r_multiple, self.r.tp2_r_multiple, levels, atr,
-                                 self.r.target_policy)
-            stop, tp1, tp2 = stop_r, round(tg.tp1, 2), round(tg.tp2, 2)
+            # swing high/low (and the breakout range itself) is excluded.
+            if is_crypto:
+                levels = ({"prior-day high": ctx.prior_high} if d is Direction.LONG else {"prior-day low": ctx.prior_low})
+            else:
+                levels = (
+                    {"prior-day high": ctx.prior_high, "premarket high": snap.premarket_high, "ORB high": snap.orb_high}
+                    if d is Direction.LONG else
+                    {"prior-day low": ctx.prior_low, "premarket low": snap.premarket_low, "ORB low": snap.orb_low}
+                )
+            tg = compute_targets(d, entry_r, stop, self.r.tp1_r_multiple, self.r.tp2_r_multiple, levels, atr,
+                                 self.r.target_policy, fees=fees)
+            tp1, tp2 = inst.round_price(tg.tp1), inst.round_price(tg.tp2)
             notes.target_caps = tg.capped_by
             bad = validate_levels(d, entry_r, stop, tp1, tp2)
             if bad and tg.capped_by and (tp1 - entry_r) * s <= 0:
@@ -351,41 +434,51 @@ class RiskAgent:
             elif bad:
                 vetoes.append(f"invalid levels: {bad}")
             else:
-                rr = round(reward_risk(d, entry_r, stop, tp1), 2)
-                rr2 = reward_risk(d, entry_r, stop, tp2)
+                rr = round(net_reward_risk(d, entry_r, stop, tp1, fees), 2)
+                rr2 = net_reward_risk(d, entry_r, stop, tp2, fees)
                 frac = self.r.tp1_scale_out_pct
                 notes.blended_rr = round(frac * rr + (1 - frac) * rr2, 2)
-                if rr < self.r.min_reward_risk:
+                if net_reward(d, entry_r, tp1, fees) <= 0:
+                    vetoes.append("fees exceed the reward to TP1")
+                elif rr < self.r.min_reward_risk:
                     why = f" ({tg.capped_by[0]})" if tg.capped_by else ""
                     vetoes.append(f"R:R {rr:.2f} to TP1 is below {self.r.min_reward_risk:.1f}{why}")
                 if notes.counter_trend and notes.blended_rr < self.r.counter_trend_min_reward_risk:
-                    vetoes.append(f"counter-trend vs SPY/QQQ: blended R:R {notes.blended_rr:.2f} is below "
-                                  f"{self.r.counter_trend_min_reward_risk:.1f}")
+                    vetoes.append(f"counter-trend vs {'BTC' if is_crypto else 'SPY/QQQ'}: blended R:R "
+                                  f"{notes.blended_rr:.2f} is below {self.r.counter_trend_min_reward_risk:.1f}")
                 notes.stop_pct = round(abs(entry_r - stop) / entry_r, 4)
-                if notes.stop_pct > 0.02:
+                wide = self.cfg.crypto.wide_stop_pct if is_crypto else 0.02
+                if notes.stop_pct > wide:
                     warns.append(f"wide stop ({notes.stop_pct:.1%} of price); size scaled down accordingly")
 
+                per_unit = risk_per_unit(entry_r, stop, fees)  # price risk + entry/exit fees
                 risk_sh, bp_sh, size = position_size(portfolio.equity, portfolio.available_cash, entry_r, stop,
-                                                     self.r.max_risk_pct, self.r.max_position_pct)
-                per_share = abs(entry_r - stop)
+                                                     risk_pct, self.r.max_position_pct, per_unit_risk=per_unit,
+                                                     entry_cost=entry_r * (1 + fees.taker_pct) + fees.per_unit)
+                risk_sh, bp_sh, size = inst.floor_qty(risk_sh), inst.floor_qty(bp_sh), inst.floor_qty(size)
                 if d is Direction.SHORT:
-                    margin_cap = math.floor(max(0.0, portfolio.available_cash) /
-                                            (entry_r * self.cfg.execution.short_margin_requirement))
+                    margin_cap = inst.floor_qty(max(0.0, portfolio.available_cash) /
+                                                (entry_r * self.cfg.execution.short_margin_requirement))
                     size = min(size, margin_cap)
-                if size >= 1 and budget_left > 0 and size * per_share > budget_left:
-                    reduced = math.floor(budget_left / per_share)
-                    warns.append(f"size cut {size} -> {reduced} shares to fit the remaining daily loss budget "
-                                 f"(${budget_left:,.2f})")
+                if size > 0 and budget_left > 0 and size * per_unit > budget_left:
+                    reduced = inst.floor_qty(budget_left / per_unit)
+                    warns.append(f"size cut {format_qty(setup.ticker, size)} -> {format_qty(setup.ticker, reduced)} "
+                                 f"to fit the remaining daily loss budget (${budget_left:,.2f})")
                     size = reduced
-                if size < 1:
-                    vetoes.append(f"position size < 1 share (risk cap {risk_sh}, buying-power cap {bp_sh})")
-                dollar_risk = round(size * per_share, 2)
+                if size <= 0 or not inst.meets_minimum(size, entry_r):
+                    if is_crypto and size > 0:
+                        vetoes.append(f"size {format_qty(setup.ticker, size)} is below the exchange minimum "
+                                      f"({format_qty(setup.ticker, inst.min_qty)} / ${inst.min_notional:,.2f})")
+                    else:
+                        vetoes.append(f"position size < 1 share (risk cap {risk_sh:g}, buying-power cap {bp_sh:g})")
+                        size = 0.0
+                dollar_risk = round(size * per_unit, 2)
+                notes.est_fees = round(size * (entry_r * fees.taker_pct + stop * fees.taker_pct + 2 * fees.per_unit), 2)
 
         approved = not vetoes
         assessment = RiskAssessment(
             ticker=setup.ticker, direction=d, approved=approved, veto_reasons=vetoes, warnings=warns,
             entry=entry_r, stop_loss=stop, tp1=tp1, tp2=tp2, risk_shares=risk_sh, buying_power_shares=bp_sh,
-            position_size=size if approved else max(0, size), dollar_risk=dollar_risk if size >= 1 else 0.0,
-            reward_risk=rr,
+            position_size=max(0.0, size), dollar_risk=dollar_risk if size > 0 else 0.0, reward_risk=rr,
         )
         return assessment, notes

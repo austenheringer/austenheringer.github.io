@@ -30,11 +30,13 @@ Fills
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from warroom.config import ExecutionSection, RiskSection
+from datetime import timedelta
+
+from warroom.core.assets import AssetRouter
 from warroom.core.clock import Clock, to_et
 from warroom.core.event_bus import EventBus
 from warroom.core.market_calendar import MarketCalendar
@@ -73,8 +75,10 @@ class Bar:
 
 class PaperBroker:
     def __init__(self, execution: ExecutionSection, risk_cfg: RiskSection, clock: Clock, calendar: MarketCalendar,
-                 starting_cash: float, *, db=None, risk_agent=None, bus: EventBus | None = None) -> None:
+                 starting_cash: float, *, db=None, risk_agent=None, bus: EventBus | None = None,
+                 router: AssetRouter | None = None) -> None:
         self.ex = execution
+        self.router = router or AssetRouter(calendar, None)
         self.risk_cfg = risk_cfg
         self.clock = clock
         self.calendar = calendar
@@ -137,9 +141,24 @@ class PaperBroker:
 
     # ------------------------------------------------------------------ pricing
 
-    def commission(self, qty: int) -> float:
+    def commission(self, qty: float) -> float:
+        """Equity commission (per share, with minimum)."""
         c = self.ex.commission_per_share * qty
         return round(max(self.ex.commission_min, c) if c > 0 or self.ex.commission_min > 0 else 0.0, 4)
+
+    def fee(self, symbol: str, qty: float, price: float, maker: bool = False) -> float:
+        """Equities: per-share commission. Crypto: % of notional (maker for resting limit
+        targets, taker for market orders: entries, stops, time stops, flattens)."""
+        inst = self.router.instrument(symbol, price)
+        if not inst.is_crypto:
+            return self.commission(qty)
+        return round(qty * price * (inst.maker_fee_pct if maker else inst.taker_fee_pct), 6)
+
+    def _max_hold(self, symbol: str) -> timedelta | None:
+        c = self.router.crypto_cfg
+        if self.router.is_crypto(symbol):
+            return timedelta(minutes=c.max_hold_minutes if c is not None else 1440)
+        return None
 
     def _market_fill(self, ref: float, buying: bool) -> float:
         slip = self.ex.slippage_pct
@@ -152,7 +171,7 @@ class PaperBroker:
         through the stop or past TP1 since the debate, the order is rejected rather than
         entered with broken geometry."""
         self._roll_day()
-        if plan.position_size < 1 or None in (plan.stop_loss, plan.tp1, plan.tp2):
+        if plan.position_size <= 0 or None in (plan.stop_loss, plan.tp1, plan.tp2):
             raise OrderRejected("plan is not executable")
         if self.position_for(plan.ticker):
             raise OrderRejected(f"already holding {plan.ticker}")
@@ -163,16 +182,18 @@ class PaperBroker:
         bad = validate_levels(d, fill, plan.stop_loss, plan.tp1, plan.tp2)  # type: ignore[arg-type]
         if bad:
             raise OrderRejected(f"price moved since the debate ({fill:.2f}): {bad}")
-        qty = plan.position_size
-        if buying:
-            affordable = math.floor(max(0.0, self.cash - self.commission(qty)) / fill)
-            qty = min(qty, affordable)
-        else:
-            affordable = math.floor(max(0.0, self.cash - self.commission(qty)) / (fill * self.ex.short_margin_requirement))
-            qty = min(qty, affordable)
-        if qty < 1:
-            raise OrderRejected("insufficient cash for even one share")
-        comm = self.commission(qty)
+        inst = self.router.instrument(plan.ticker, fill)
+        if d is Direction.SHORT and not inst.allow_short:
+            raise OrderRejected(f"short selling not available for {plan.ticker}")
+        qty = inst.floor_qty(plan.position_size)
+        fee_rate = inst.taker_fee_pct if inst.is_crypto else 0.0
+        per_unit_cost = fill * (1 + fee_rate) if buying else fill * self.ex.short_margin_requirement + fill * fee_rate
+        affordable = inst.floor_qty(max(0.0, self.cash - self.commission(qty)) / per_unit_cost)
+        qty = min(qty, affordable)
+        if qty <= 0 or not inst.meets_minimum(qty, fill):
+            raise OrderRejected("insufficient cash for even one share" if not inst.is_crypto
+                                else f"insufficient cash for the exchange minimum order ({inst.min_qty:g} {inst.base})")
+        comm = self.fee(plan.ticker, qty, fill)
         margin = 0.0
         if buying:
             self.cash -= qty * fill + comm
@@ -193,11 +214,11 @@ class PaperBroker:
 
     # ------------------------------------------------------------------ exits
 
-    async def _exit(self, pos: Position, qty: int, price: float, reason: ExitReason) -> Fill:
+    async def _exit(self, pos: Position, qty: float, price: float, reason: ExitReason, maker: bool = False) -> Fill:
         qty = min(qty, pos.qty)
         s = pos.direction.sign
-        pnl = round((price - pos.entry_price) * qty * s, 4)
-        comm = self.commission(qty)
+        pnl = round((price - pos.entry_price) * qty * s, 6)
+        comm = self.fee(pos.ticker, qty, price, maker=maker)
         if pos.direction is Direction.LONG:
             self.cash += qty * price - comm
         else:
@@ -205,9 +226,10 @@ class PaperBroker:
             pos.reserved_margin = round(pos.reserved_margin - release, 4)
             self.reserved_margin = max(0.0, self.reserved_margin - release)
             self.cash += release + pnl - comm
-        pos.qty -= qty
-        pos.realized_pnl = round(pos.realized_pnl + pnl, 4)
-        pos.commissions = round(pos.commissions + comm, 4)
+        remaining = round(pos.qty - qty, 10)
+        pos.qty = remaining if remaining > 1e-12 else 0.0
+        pos.realized_pnl = round(pos.realized_pnl + pnl, 6)
+        pos.commissions = round(pos.commissions + comm, 6)
         pos.last_price = price
         closed = pos.qty == 0
         if closed:
@@ -234,15 +256,26 @@ class PaperBroker:
         if self.bus is not None:
             self.bus.publish(TradeExecuted(timestamp=f.timestamp, fill=f, position=pos.model_copy()))
 
-    async def on_bar(self, ticker: str, bar: Bar) -> list[Fill]:
-        """Process one completed 1m bar for ``ticker``: stops, targets, EOD flat."""
+    async def on_bar(self, ticker: str, bar: Bar, bar_time: datetime | None = None) -> list[Fill]:
+        """Process one completed 1m bar for ``ticker``: stops, targets, EOD flat / time stop.
+        A bar that opened before a position was entered is ignored for that position."""
         self._roll_day()
         self.last_prices[ticker] = bar.close
         fills: list[Fill] = []
         now = self.clock.now()
         sess = self.calendar.session_for(now)
         for pos in [p for p in self.open_positions if p.ticker == ticker]:
+            if bar_time is not None and bar_time < pos.opened_at - timedelta(minutes=1):
+                continue  # pre-entry bar: its high/low say nothing about this position
             pos.last_price = bar.close
+            hold = self._max_hold(ticker)
+            if hold is not None:  # crypto: 24/7, no EOD flat; a time stop caps the holding period
+                if now - pos.opened_at >= hold:
+                    fills.append(await self._exit(pos, pos.qty, self._market_fill(bar.close, pos.direction is Direction.SHORT),
+                                                  ExitReason.TIME_STOP))
+                    continue
+                fills.extend(await self._check_levels(pos, bar))
+                continue
             stale = to_et(pos.opened_at).date() < to_et(now).date()
             if stale or (sess is not None and sess.past_eod_flat(now)):
                 fills.append(await self._exit(pos, pos.qty, self._market_fill(bar.close, pos.direction is Direction.SHORT),
@@ -268,22 +301,29 @@ class PaperBroker:
             return out
         if not pos.tp1_hit and tp1_hit:
             px = max(pos.tp1, bar.open) if long else min(pos.tp1, bar.open)
-            scale = max(1, math.floor(pos.initial_qty * self.risk_cfg.tp1_scale_out_pct))
-            if scale >= pos.qty:
-                out.append(await self._exit(pos, pos.qty, px, ExitReason.TP1))
+            inst = self.router.instrument(pos.ticker, px)
+            scale = inst.floor_qty(pos.initial_qty * self.risk_cfg.tp1_scale_out_pct)
+            if not inst.is_crypto:
+                scale = max(1.0, scale)
+            rest = pos.qty - scale
+            # can't split (one share, or either half below the exchange minimum): take it all at TP1
+            if scale >= pos.qty or not inst.meets_minimum(scale, px) or not inst.meets_minimum(rest, px):
+                out.append(await self._exit(pos, pos.qty, px, ExitReason.TP1, maker=True))
                 return out
             pos.tp1_hit = True
             pos.stop_loss = pos.entry_price  # breakeven
-            out.append(await self._exit(pos, scale, px, ExitReason.TP1))
+            out.append(await self._exit(pos, scale, px, ExitReason.TP1, maker=True))
         if pos.tp1_hit and pos.qty > 0 and tp2_hit:
             px = max(pos.tp2, bar.open) if long else min(pos.tp2, bar.open)
-            out.append(await self._exit(pos, pos.qty, px, ExitReason.TP2))
+            out.append(await self._exit(pos, pos.qty, px, ExitReason.TP2, maker=True))
         return out
 
     async def flatten_all(self, reason: ExitReason = ExitReason.MANUAL_FLATTEN,
-                          prices: dict[str, float] | None = None) -> list[Fill]:
+                          prices: dict[str, float] | None = None, symbols: set[str] | None = None) -> list[Fill]:
         fills = []
         for pos in list(self.open_positions):
+            if symbols is not None and pos.ticker not in symbols:
+                continue
             last = (prices or {}).get(pos.ticker) or self.last_prices.get(pos.ticker) or pos.last_price or pos.entry_price
             fills.append(await self._exit(pos, pos.qty, self._market_fill(last, pos.direction is Direction.SHORT), reason))
         return fills

@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 from warroom.config import HttpSection
-from warroom.core.assets import AssetClass, AssetRouter, CryptoSchedule, Instrument, format_price, format_qty
+from warroom.core.assets import AssetClass, AssetRouter, CryptoSchedule, format_price, format_qty
 from warroom.core.clock import SimulatedClock
 from warroom.core.market_calendar import MarketCalendar
 from warroom.models.schemas import MacroEventKind, Severity, Timeframe

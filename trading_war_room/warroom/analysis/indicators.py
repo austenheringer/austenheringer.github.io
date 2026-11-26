@@ -13,17 +13,20 @@ from datetime import date, datetime
 import numpy as np
 import pandas as pd
 
-from warroom.core.clock import ensure_utc, to_et
+from warroom.core.clock import ensure_utc
 from warroom.core.market_calendar import MarketCalendar, TradingSession
 
 
-def et_index(df: pd.DataFrame) -> pd.DatetimeIndex:
-    """Vectorised UTC -> America/New_York conversion of a bar index."""
-    return df.index.tz_convert("America/New_York")
+ET_TZ = "America/New_York"
 
 
-def et_dates(df: pd.DataFrame) -> np.ndarray:
-    return np.array(et_index(df).date)
+def et_index(df: pd.DataFrame, tz: str = ET_TZ) -> pd.DatetimeIndex:
+    """Vectorised UTC -> local conversion of a bar index (ET for equities, UTC for crypto)."""
+    return df.index.tz_convert(tz)
+
+
+def et_dates(df: pd.DataFrame, tz: str = ET_TZ) -> np.ndarray:
+    return np.array(et_index(df, tz).date)
 
 
 def ema(series: pd.Series, period: int) -> pd.Series:
@@ -99,11 +102,11 @@ def premarket_range(df_1m: pd.DataFrame, session: TradingSession) -> tuple[float
     return float(pm["high"].max()), float(pm["low"].min())
 
 
-def prior_day_levels(df_5m_rth: pd.DataFrame, today: date) -> tuple[float, float, float] | None:
-    """(high, low, close) of the most recent regular session before ``today``."""
+def prior_day_levels(df_5m_rth: pd.DataFrame, today: date, tz: str = ET_TZ) -> tuple[float, float, float] | None:
+    """(high, low, close) of the most recent session before ``today`` (ET dates; UTC for crypto)."""
     if df_5m_rth.empty:
         return None
-    days = et_dates(df_5m_rth)
+    days = et_dates(df_5m_rth, tz)
     prior = sorted(d for d in np.unique(days) if d < today)
     if not prior:
         return None
@@ -111,18 +114,18 @@ def prior_day_levels(df_5m_rth: pd.DataFrame, today: date) -> tuple[float, float
     return float(sub["high"].max()), float(sub["low"].min()), float(sub["close"].iloc[-1])
 
 
-def relative_volume(df_5m_rth: pd.DataFrame, now: datetime, lookback_days: int) -> float | None:
+def relative_volume(df_5m_rth: pd.DataFrame, now: datetime, lookback_days: int, tz: str = ET_TZ) -> float | None:
     """Cumulative volume today up to the current time-of-day, divided by the average
     cumulative volume at the same time-of-day over the prior ``lookback_days`` sessions.
     Time-of-day matching matters: comparing 10:00 volume to a full day's average
     would make every morning look dead."""
     if df_5m_rth.empty:
         return None
-    eti = et_index(df_5m_rth)
+    eti = et_index(df_5m_rth, tz)
     days = np.array(eti.date)
     minutes = eti.hour * 60 + eti.minute
     vol = df_5m_rth["volume"].to_numpy()
-    today = to_et(now).date()
+    today = pd.Timestamp(now).tz_convert(tz).date()
     today_mask = days == today
     if not today_mask.any():
         return None
@@ -134,6 +137,26 @@ def relative_volume(df_5m_rth: pd.DataFrame, now: datetime, lookback_days: int) 
     if not hist:
         return None
     return today_cum / float(np.mean(hist))
+
+
+def rolling_range(df: pd.DataFrame, minutes: int, now: datetime) -> tuple[float, float] | None:
+    """(high, low) of bars opened in the last ``minutes`` EXCLUDING the latest bar, so a
+    breakout bar is compared with the range it is breaking, not with itself."""
+    if len(df) < 3:
+        return None
+    prior = df.iloc[:-1]
+    window = prior[prior.index >= pd.Timestamp(now) - pd.Timedelta(minutes=minutes)]
+    if len(window) < 2:
+        return None
+    return float(window["high"].max()), float(window["low"].min())
+
+
+def resample_ohlcv(df: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.resample(f"{minutes}min", label="left", closed="left", origin="epoch").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
+    return out.dropna(subset=["open"])
 
 
 def swing_levels(df: pd.DataFrame, lookback: int) -> tuple[float, float] | None:

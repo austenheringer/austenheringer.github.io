@@ -130,6 +130,9 @@ class WarRoomApp(App):
             (f" {o.mode.value} ", "bold reverse"), "  Equity ", (f"${eq:,.2f}", "bold"), "  Day P&L ",
             (f"{'+' if pnl >= 0 else '-'}${abs(pnl):,.2f} ({pct:+.2%})", f"bold {col}"),
             "  Breakers ", (circuit, f"bold {ccol}"), "  Regime ", (regime, f"bold {rcol}"),
+            *((("  BTC ", ""), (o.crypto_regime.value.replace("_", "-"),
+                                f"bold {({MarketRegime.RISK_ON: 'green', MarketRegime.RISK_OFF: 'red'}).get(o.crypto_regime, 'yellow')}"))
+              if o.router.crypto_symbols else ()),
             "  Voice ", ("ON" if o.speech.active else "OFF", "bold"),
             "  LLM ", (o.dialogue.active_provider, "dim"),
             f"  {to_et(o.clock.now()):%Y-%m-%d %H:%M:%S} ET",
@@ -146,7 +149,7 @@ class WarRoomApp(App):
                 continue
             vd = s.vwap_distance_pct
             table.add_row(
-                tk, f"{s.price:,.2f}",
+                tk, format_price(tk, s.price),
                 Text(f"{vd:+.2%}" if vd is not None else "-", style="green" if (vd or 0) >= 0 else "red"),
                 f"{s.rsi14:.0f}" if s.rsi14 is not None else "-",
                 Text(f"{s.rvol:.1f}x" if s.rvol is not None else "-", style="bold" if (s.rvol or 0) >= 1.5 else ""),
@@ -158,8 +161,9 @@ class WarRoomApp(App):
         table.clear()
         for p in self.orch.broker.open_positions:
             u = p.unrealized_pnl()
-            table.add_row(p.ticker, p.direction.value, str(p.qty), f"{p.entry_price:.2f}", f"{p.stop_loss:.2f}",
-                          f"{p.tp1:.2f}", f"{p.tp2:.2f}", f"{p.last_price or 0:.2f}",
+            px = lambda v: format_price(p.ticker, v)  # noqa: E731
+            table.add_row(p.ticker, p.direction.value, format_qty(p.ticker, p.qty).replace(" shares", ""), px(p.entry_price),
+                          px(p.stop_loss), px(p.tp1), px(p.tp2), px(p.last_price or 0),
                           Text(f"{u:+,.2f}", style="green" if u >= 0 else "red"))
 
     def _war_line(self, e: WarRoomMessage) -> Text:
@@ -174,8 +178,7 @@ class WarRoomApp(App):
     def handle_event(self, e: BaseEvent) -> None:
         if isinstance(e, MarketUpdate):
             self._rows[e.ticker] = e
-            if len(self._rows) >= len(self.orch.cfg.app.tickers) or e.ticker == self.orch.cfg.app.tickers[-1]:
-                self._render_watch()
+            self._render_watch()
         elif isinstance(e, WarRoomMessage):
             log_ = self.query_one("#warroom", RichLog)
             if e.message.round_number == 1 and e.message.sender is AgentRole.TECHNICAL:

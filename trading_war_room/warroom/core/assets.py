@@ -56,7 +56,7 @@ class Instrument:
         """Round DOWN to the lot step (never round a size up)."""
         if qty <= 0 or not math.isfinite(qty):
             return 0.0
-        steps = math.floor(qty / self.qty_step + 1e-9)
+        steps = math.floor(round(qty / self.qty_step, 6))  # snap float noise to the step grid, then floor
         out = steps * self.qty_step
         return float(round(out, 10)) if self.is_crypto else float(int(out))
 

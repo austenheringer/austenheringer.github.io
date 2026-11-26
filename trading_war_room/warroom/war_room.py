@@ -234,7 +234,8 @@ class WarRoom:
         if notes.counter_trend:
             need = self.risk.r.counter_trend_min_reward_risk
             have = f"{notes.blended_rr:.2f}" if notes.blended_rr is not None else "n/a"
-            point = f"SPY/QQQ are {bias.regime.value.replace('_', '-').lower()}; this {d.value.lower()} fights the index"
+            idx = "BTC is" if ctx.is_crypto else "SPY/QQQ are"
+            point = f"{idx} {bias.regime.value.replace('_', '-').lower()}; this {d.value.lower()} fights the index"
             await self._say(msgs, did, tk, R, 2, Stance.CHALLENGE,
                             f"{point}. Counter-trend needs blended R:R {need:.1f}; this offers {have}.",
                             recipient=T, point=point)

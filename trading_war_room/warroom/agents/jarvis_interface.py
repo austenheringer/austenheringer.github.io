@@ -30,6 +30,7 @@ from warroom.providers.llm_provider import DialogueEngine
 SETUP_NAMES = {
     "VWAP_BOUNCE": "VWAP bounce", "VWAP_REJECTION": "VWAP rejection", "ORB_BREAKOUT": "opening-range breakout",
     "ORB_BREAKDOWN": "opening-range breakdown", "EMA_PULLBACK": "EMA pullback", "RVOL_MOMENTUM": "high-RVOL momentum",
+    "RANGE_BREAKOUT": "range breakout", "RANGE_BREAKDOWN": "range breakdown",
 }
 
 _WIT = [
@@ -142,6 +143,7 @@ class StatusReport:
     positions: list[PositionLine] = field(default_factory=list)
     llm: str = "rule_based"
     voice: str = "text-only"
+    crypto_regime: MarketRegime | None = None
     market_status: str = "OPEN"
 
 
@@ -210,8 +212,9 @@ class JarvisInterface:
             f"(stop {format_price(p.ticker, p.stop)}, P&L {_money(p.unrealized)})"
             for p in s.positions)
         return (f"{self.title}, {s.mode} mode. Equity {_money(s.equity)}, day P&L {_money(s.day_pnl)} "
-                f"({s.day_pnl_pct:+.2%}). {pos[:1].upper() + pos[1:]}. Market regime {s.regime.value.replace('_', '-').lower()}, "
-                f"circuit breakers {s.circuit.lower()}.")
+                f"({s.day_pnl_pct:+.2%}). {pos[:1].upper() + pos[1:]}. Market regime {s.regime.value.replace('_', '-').lower()}"
+                + (f", crypto regime {s.crypto_regime.value.replace('_', '-').lower()}" if s.crypto_regime else "")
+                + f", circuit breakers {s.circuit.lower()}.")
 
     def why_draft(self, t: WarRoomTranscript | None, ticker: str | None) -> str:
         if t is None:

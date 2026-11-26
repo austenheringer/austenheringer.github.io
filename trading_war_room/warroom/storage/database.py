@@ -27,6 +27,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from warroom.core.assets import CRYPTO_SYMBOL_RE
 from warroom.core.clock import ET, ensure_utc, to_et
 from warroom.core.market_calendar import MarketCalendar
 from warroom.models.schemas import (
@@ -69,7 +70,7 @@ CREATE TABLE IF NOT EXISTS positions (
 CREATE INDEX IF NOT EXISTS ix_positions_status ON positions(status);
 CREATE TABLE IF NOT EXISTS fills (
     id TEXT PRIMARY KEY, position_id TEXT NOT NULL, ticker TEXT NOT NULL, is_entry INTEGER NOT NULL,
-    qty INTEGER NOT NULL, price REAL NOT NULL, commission REAL NOT NULL, realized_pnl REAL NOT NULL,
+    qty REAL NOT NULL, price REAL NOT NULL, commission REAL NOT NULL, realized_pnl REAL NOT NULL,
     reason TEXT, timestamp TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_fills_time ON fills(timestamp);
 CREATE TABLE IF NOT EXISTS account_state (
@@ -144,6 +145,7 @@ def derive_risk_state(
         to_et(p.closed_at).date()  # type: ignore[arg-type]
         for p in closed_positions
         if p.closed_at
+        and not CRYPTO_SYMBOL_RE.match(p.ticker)  # PDT is an equities rule
         and to_et(p.opened_at).date() == to_et(p.closed_at).date()
         and to_et(p.closed_at).date() in window
     )
