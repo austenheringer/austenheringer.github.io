@@ -189,7 +189,8 @@ class WarRoom:
             except Exception:  # noqa: BLE001
                 log.exception("failed to persist transcript")
         self.bus.publish(JarvisBriefing(timestamp=self.clock.now(), text=briefing, debate_id=did,
-                                        speak=plan.status is not PlanStatus.VETOED or setup.on_demand))
+                                        speak=plan.status is not PlanStatus.VETOED or setup.on_demand,
+                                        status=plan.status.value))
         return transcript
 
     # ------------------------------------------------------------------ round 2

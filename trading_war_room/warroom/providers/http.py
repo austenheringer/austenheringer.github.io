@@ -108,5 +108,7 @@ def _parse_retry_after(value: str | None) -> float | None:
 
 
 def _redact(url: str) -> str:
-    """Strip query strings from logged URLs (some APIs put tokens there)."""
-    return url.split("?", 1)[0]
+    """Strip query strings and path-embedded bot tokens from logged URLs."""
+    import re
+
+    return re.sub(r"/bot[^/]+", "/bot<redacted>", url.split("?", 1)[0])

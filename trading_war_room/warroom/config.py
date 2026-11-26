@@ -208,9 +208,11 @@ class StorageSection(_Section):
 
 
 class ReplaySection(_Section):
-    source: Literal["auto", "csv", "alpaca", "yfinance"] = "auto"
+    source: Literal["auto", "csv", "alpaca", "yfinance", "mock"] = "auto"
     data_dir: str = "data/history"
     starting_equity: float = Field(default=100_000.0, gt=0)
+    assumed_spread_pct: float = Field(default=0.0005, ge=0, le=0.02)
+    scan_every_minutes: int = Field(default=1, ge=1, le=60)
 
 
 class NotificationsSection(_Section):

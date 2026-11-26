@@ -494,6 +494,7 @@ class JarvisBriefing(BaseEvent):
     debate_id: str | None = None
     kind: str = "briefing"  # briefing | response | greeting
     speak: bool = True
+    status: str | None = None  # plan status for briefings (APPROVED / WATCHLIST / VETOED)
 
 
 class TradeExecuted(BaseEvent):

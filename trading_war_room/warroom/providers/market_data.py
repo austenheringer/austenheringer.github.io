@@ -368,3 +368,77 @@ class AlpacaDataProvider(MarketDataProvider):
 
     async def aclose(self) -> None:
         await self.http.aclose()
+
+
+class CsvDataProvider(MarketDataProvider):
+    """Historical 1m bars from ``<data_dir>/<YYYY-MM-DD>/<TICKER>.csv`` for --replay.
+
+    CSV columns: ``timestamp,open,high,low,close,volume`` with timezone-aware
+    timestamps (``2025-01-15T14:30:00Z`` or with an explicit offset). Naive
+    timestamps are rejected. Prior-day directories, when present, provide
+    the EMA/ATR warm-up, RVOL baseline and prior-day levels.
+
+    Historical bid/ask is not in the files, so quotes are SYNTHESISED from the
+    bar close with ``assumed_spread_pct``. The replay report labels this
+    assumption; it is the one place a quote is not a real quote.
+    """
+
+    name = "csv"
+    has_real_quotes = True  # synthetic by declared assumption (see class docstring)
+
+    def __init__(self, clock: Clock, data_dir: str, assumed_spread_pct: float = 0.0005) -> None:
+        super().__init__(clock)
+        from pathlib import Path
+
+        self.root = Path(data_dir)
+        self.spread = assumed_spread_pct
+        self._cache: dict[tuple[str, date], pd.DataFrame] = {}
+
+    def available(self, ticker: str, d: date) -> bool:
+        return (self.root / d.isoformat() / f"{ticker}.csv").exists()
+
+    def _day(self, ticker: str, d: date) -> pd.DataFrame:
+        key = (ticker, d)
+        if key not in self._cache:
+            path = self.root / d.isoformat() / f"{ticker}.csv"
+            if not path.exists():
+                self._cache[key] = empty_bars()
+            else:
+                raw = pd.read_csv(path)
+                if "timestamp" not in raw.columns:
+                    raise ProviderError(f"{path}: missing 'timestamp' column")
+                ts = pd.to_datetime(raw["timestamp"], utc=False)
+                if getattr(ts.dt, "tz", None) is None:
+                    raise ProviderError(f"{path}: timestamps must include a timezone (e.g. ...Z)")
+                raw.index = pd.DatetimeIndex(ts).tz_convert("UTC")
+                self._cache[key] = normalize_bars(raw.drop(columns=["timestamp"]))
+        return self._cache[key]
+
+    async def get_bars(self, ticker: str, timeframe: Timeframe, start: datetime,
+                       end: datetime | None = None) -> pd.DataFrame:
+        now = self.clock.now()
+        start = ensure_utc(start)
+        end = min(ensure_utc(end), now) if end else now
+        frames = []
+        d = to_et(start).date()
+        while d <= to_et(end).date():
+            df = self._day(ticker, d)
+            if not df.empty:
+                frames.append(df)
+            d += timedelta(days=1)
+        if not frames:
+            return empty_bars()
+        df = pd.concat(frames)
+        df = df[(df.index >= pd.Timestamp(start)) & (df.index <= pd.Timestamp(end))]
+        df = resample_bars(completed_only(df, Timeframe.M1, now), timeframe)
+        return completed_only(df, timeframe, now)
+
+    async def get_quote(self, ticker: str) -> Quote | None:
+        now = self.clock.now()
+        df = completed_only(self._day(ticker, to_et(now).date()), Timeframe.M1, now)
+        if df.empty:
+            return None
+        last = float(df["close"].iloc[-1])
+        half = last * self.spread / 2
+        return Quote(ticker=ticker, timestamp=df.index[-1].to_pydatetime() + timedelta(minutes=1),
+                     bid=round(last - half, 4), ask=round(last + half, 4), last=last)

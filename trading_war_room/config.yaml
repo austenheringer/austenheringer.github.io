@@ -115,9 +115,11 @@ storage:
 replay:
   # Free sources do not serve old 1m bars (yfinance keeps ~30 days). Drop CSVs here as
   # <data_dir>/<YYYY-MM-DD>/<TICKER>.csv (timestamp,open,high,low,close,volume; UTC) to replay any date.
-  source: auto                      # auto (csv -> alpaca -> yfinance -> fail) | csv | alpaca | yfinance
+  source: auto                      # auto (csv -> alpaca -> yfinance -> fail) | csv | alpaca | yfinance | mock
   data_dir: data/history
   starting_equity: 100000.0
+  assumed_spread_pct: 0.0005        # historical bid/ask is unavailable: quotes are synthesised from bar closes
+  scan_every_minutes: 1             # War Room scan cadence in replay (clock minutes)
 
 notifications:
   discord_enabled: false
