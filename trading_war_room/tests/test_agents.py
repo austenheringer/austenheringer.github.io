@@ -378,3 +378,12 @@ async def test_full_pipeline_on_mock_day(cfg, cal):
                     (t.plan.stop_loss > t.plan.entry > t.plan.tp1 > t.plan.tp2)
         rig.clk.advance(timedelta(minutes=10))
     assert seen > 0
+
+
+def test_breakout_not_chased_when_rsi_exhausted(cfg, cal):
+    tech, _ = _tech(cfg, cal)
+    snap = snapshot(price=101.2, vwap=100.5, ema9=100.9, ema21=100.6, ema50=100.2, rsi14=86, atr14=0.8,
+                    orb_high=101.0, orb_low=99.5, rvol=1.8)
+    ctx = context(snap)
+    ctx.bars_5m = _bars([100.2, 100.6, 100.9, 101.2])
+    assert not any(s.setup_type is SetupType.ORB_BREAKOUT for s in tech.detect_setups(ctx, NEUTRAL))

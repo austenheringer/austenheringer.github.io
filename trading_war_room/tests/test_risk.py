@@ -316,3 +316,11 @@ def test_day_roll_resets_but_keeps_pause(cfg):
     assert agent.roll_day()
     st = agent.state
     assert st.realized_pnl_today == 0 and st.consecutive_losses == 0 and not st.halted_for_day and st.entries_paused
+
+
+def test_strongly_adverse_news_vetoes_even_at_medium_severity(cfg):
+    agent, _ = _agent(cfg)
+    a, _ = agent.evaluate(setup(direction=S, snap=snapshot(price=100.0, vwap=100.3, ema9=99.9, ema21=100.1)),
+                          context(snapshot(price=100.0, vwap=100.3, ema9=99.9, ema21=100.1)),
+                          news(sentiment=0.9, severity=Severity.MEDIUM, conflict=True), portfolio(), None)
+    assert any("strongly adverse news" in v for v in a.veto_reasons)

@@ -16,7 +16,10 @@ python main.py --demo --voice      # + British voice briefings (edge-tts/pygame/
 python main.py --paper             # real data providers from config.yaml + .env, paper broker
 python main.py --replay 2025-01-15 --tickers AAPL,NVDA,TSLA
 python main.py --smoke-test        # 3 headless cycles, exit 0 on success
-pytest -q
+python main.py --replay 2025-01-15 --replay-source mock   # replay on the synthetic tape
+python main.py --check-providers   # live checks of configured providers/keys
+python main.py --demo --headless   # console event stream instead of the TUI
+pytest -q                          # ~35s, no network
 ```
 
 ## Layout
@@ -47,10 +50,11 @@ warroom/
   agents/risk_agent.py       compute_stop/compute_targets/position_size (pure) + RiskAgent veto engine
   agents/jarvis_interface.py command parser, briefings, status/why/transcript, JarvisContext protocol
   war_room.py                3-round debate; per-ticker lock + global portfolio lock around vote+execution
-  orchestrator.py            scan loop wiring agents, war room, broker, bus, storage
+  orchestrator.py            build()/start()/run_cycle()/run_forever()/shutdown(); implements JarvisContext
   execution/paper_broker.py  simulated fills, SL / TP1 (50% + BE) / TP2 / EOD flat
-  backtest/replay_engine.py  SimulatedClock-driven replay through the same pipeline
-  dashboard/tui_app.py       Textual UI (bus subscriber)
+  backtest/replay_engine.py  SimulatedClock replay through the real Orchestrator (csv/alpaca/yfinance/mock)
+  backtest/metrics.py        ReplayReport, profit factor, max drawdown
+  dashboard/tui_app.py       Textual UI (bus subscriber); tested headlessly via App.run_test()
   voice/speech.py            async speech queue (edge-tts -> pyttsx3 -> text-only)
   notifications/alerts.py    Discord / Telegram
 tests/
@@ -98,6 +102,10 @@ tests/
 - Risk collects every veto reason (no short-circuit) so `why <TICKER>` is complete.
 - Round 3 re-evaluates against the live portfolio under the global portfolio lock and executes
   inside the same lock: two debates can never both take the last slot.
+
+## Exit codes (main.py)
+
+0 success · 1 smoke/provider check failed · 2 configuration or data-availability error.
 
 ## Conventions
 
