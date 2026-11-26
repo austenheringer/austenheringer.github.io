@@ -282,6 +282,9 @@ class MacroEvent(_Frozen):
     scheduled_at: UTCDatetime
     severity: Severity
     ticker: str | None = None  # set for earnings / halts
+    ends_at: UTCDatetime | None = None  # halts: resumption time if known
+    ongoing: bool = False               # halts: no resumption announced yet
+    source: str = "calendar"
 
 
 class NewsAssessment(_Frozen):

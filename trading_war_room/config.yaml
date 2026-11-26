@@ -64,6 +64,9 @@ news:
   blackout_minutes_before: 15
   blackout_minutes_after: 15
   conflict_sentiment_threshold: 0.3 # |sentiment| beyond this against direction = conflict
+  halt_feed_enabled: true           # Nasdaq Trader halt RSS (paper mode)
+  macro_cache_path: data/macro_cache.json
+  macro_refresh_days: 7             # re-fetch Fed FOMC + BLS schedules weekly
 
 execution:
   slippage_pct: 0.0005              # 0.05%

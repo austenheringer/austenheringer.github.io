@@ -131,6 +131,9 @@ class NewsSection(_Section):
     blackout_minutes_before: int = Field(default=15, ge=0, le=240)
     blackout_minutes_after: int = Field(default=15, ge=0, le=240)
     conflict_sentiment_threshold: float = Field(default=0.3, gt=0, le=1)
+    halt_feed_enabled: bool = True
+    macro_cache_path: str = "data/macro_cache.json"
+    macro_refresh_days: int = Field(default=7, ge=1, le=90)
 
 
 class ExecutionSection(_Section):

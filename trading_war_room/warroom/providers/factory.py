@@ -19,6 +19,7 @@ from warroom.core.clock import Clock, DemoClock, et_to_utc
 from warroom.core.market_calendar import MarketCalendar
 from warroom.models.schemas import Mode
 from warroom.providers.base import LLMProvider, MarketDataProvider, NewsProvider, ProviderUnavailable
+from warroom.providers.calendar_feeds import HaltAwareNewsProvider, MacroCalendarUpdater, NasdaqHaltProvider
 from warroom.providers.llm_provider import AnthropicProvider, DialogueEngine, OpenAIProvider
 from warroom.providers.market_data import AlpacaDataProvider, MockDataProvider, YFinanceDataProvider
 from warroom.providers.news_data import (
@@ -72,28 +73,49 @@ def build_market_data(cfg: AppConfig, secrets: Secrets, clock: Clock, calendar: 
     raise ConfigError(f"unknown market data provider {choice!r}")  # pragma: no cover
 
 
+async def build_macro_calendar(cfg: AppConfig, calendar: MarketCalendar, clock: Clock,
+                               mode: Mode) -> tuple[StaticMacroCalendar, list[str]]:
+    """PAPER refreshes the Fed/BLS schedules (weekly cache); other modes use cache + built-ins
+    without touching the network. Returns the calendar and human-readable notes/warnings."""
+    updater = MacroCalendarUpdater(cfg.http, cfg.news.macro_cache_path, cfg.news.macro_refresh_days)
+    if mode is Mode.PAPER:
+        fomc, events, notes = await updater.refresh(clock.now())
+    else:
+        fomc, events, _ = updater.load_cache()
+        notes = []
+    macro = StaticMacroCalendar(calendar, fetched_fomc=fomc, fetched_events=events)
+    if mode is Mode.PAPER:
+        notes.extend(macro.coverage_warnings(clock.now()))
+    return macro, notes
+
+
 def build_news(cfg: AppConfig, secrets: Secrets, clock: Clock, calendar: MarketCalendar, mode: Mode,
-               market: MarketDataProvider | None = None) -> NewsProvider:
-    macro = StaticMacroCalendar(calendar)
+               market: MarketDataProvider | None = None, macro: StaticMacroCalendar | None = None) -> NewsProvider:
+    macro = macro or StaticMacroCalendar(calendar)
     if mode in (Mode.DEMO, Mode.SMOKE):
         scenario_fn = market.scenario if isinstance(market, MockDataProvider) else None
         return MockNewsProvider(clock, calendar, cfg.app.tickers, seed=cfg.providers.mock_seed, scenario_fn=scenario_fn)
     if mode is Mode.REPLAY:
         return CalendarOnlyNewsProvider(clock, macro)
     choice = cfg.providers.news
+    inner: NewsProvider
     try:
         if choice == "mock":
             return MockNewsProvider(clock, calendar, cfg.app.tickers, seed=cfg.providers.mock_seed)
         if choice == "rss":
-            return RSSNewsProvider(clock, cfg.providers.rss_feeds, cfg.http, macro)
-        if choice == "alpaca":
-            return AlpacaNewsProvider(clock, _secret(secrets.alpaca_api_key), _secret(secrets.alpaca_secret_key),
-                                      cfg.http, macro)
-        if choice == "finnhub":
-            return FinnhubNewsProvider(clock, _secret(secrets.finnhub_api_key), cfg.http, macro, cfg.app.tickers)
+            inner = RSSNewsProvider(clock, cfg.providers.rss_feeds, cfg.http, macro)
+        elif choice == "alpaca":
+            inner = AlpacaNewsProvider(clock, _secret(secrets.alpaca_api_key), _secret(secrets.alpaca_secret_key),
+                                       cfg.http, macro)
+        elif choice == "finnhub":
+            inner = FinnhubNewsProvider(clock, _secret(secrets.finnhub_api_key), cfg.http, macro, cfg.app.tickers)
+        else:  # pragma: no cover
+            raise ConfigError(f"unknown news provider {choice!r}")
     except ProviderUnavailable as exc:
         raise ConfigError(f"news provider '{choice}' unavailable: {exc}") from exc
-    raise ConfigError(f"unknown news provider {choice!r}")  # pragma: no cover
+    if cfg.news.halt_feed_enabled:
+        return HaltAwareNewsProvider(inner, NasdaqHaltProvider(clock, cfg.http), cfg.app.tickers)
+    return inner
 
 
 def build_llm(cfg: AppConfig, secrets: Secrets, mode: Mode) -> LLMProvider | None:

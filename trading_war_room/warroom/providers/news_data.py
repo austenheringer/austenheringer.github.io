@@ -47,11 +47,24 @@ FOMC_DECISION_DATES: tuple[date, ...] = (
 
 
 class StaticMacroCalendar:
-    def __init__(self, calendar: MarketCalendar, user_file: str | Path | None = "data/macro_events.yaml") -> None:
+    """Built-in FOMC dates + fetched FOMC/BLS schedules + user YAML events.
+
+    ``fetched_fomc`` / ``fetched_events`` come from
+    :class:`warroom.providers.calendar_feeds.MacroCalendarUpdater` (Fed and BLS
+    schedules, cached). When BLS data covers a month, its exact payrolls date
+    replaces the approximate first-Friday rule for that month.
+    """
+
+    def __init__(self, calendar: MarketCalendar, user_file: str | Path | None = "data/macro_events.yaml",
+                 fetched_fomc: list[date] | None = None, fetched_events: list[MacroEvent] | None = None) -> None:
         self.calendar = calendar
         self._user: list[MacroEvent] = []
         if user_file and Path(user_file).exists():
             self._user = self._load(Path(user_file))
+        self.fomc_dates: set[date] = set(FOMC_DECISION_DATES) | set(fetched_fomc or [])
+        self._fetched = list(fetched_events or [])
+        self._nfp_months = {(to_et(e.scheduled_at).year, to_et(e.scheduled_at).month)
+                            for e in self._fetched if e.kind is MacroEventKind.NFP}
 
     @staticmethod
     def _load(path: Path) -> list[MacroEvent]:
@@ -65,7 +78,7 @@ class StaticMacroCalendar:
                 out.append(MacroEvent(
                     name=row["name"], kind=MacroEventKind(row.get("kind", "OTHER")),
                     scheduled_at=et_to_utc(datetime.combine(d, time(hh, mm))),
-                    severity=Severity(row.get("severity", "HIGH")), ticker=row.get("ticker"),
+                    severity=Severity(row.get("severity", "HIGH")), ticker=row.get("ticker"), source="user",
                 ))
             except Exception as exc:  # noqa: BLE001 - surface which row is wrong
                 raise ProviderError(f"{path}: invalid macro event #{i}: {exc}") from exc
@@ -76,16 +89,33 @@ class StaticMacroCalendar:
         out: list[MacroEvent] = []
         d = to_et(start).date()
         while d <= to_et(end).date():
-            if d in FOMC_DECISION_DATES:
+            if d in self.fomc_dates:
                 out.append(MacroEvent(name="FOMC rate decision", kind=MacroEventKind.FOMC,
                                       scheduled_at=et_to_utc(datetime.combine(d, time(14, 0))), severity=Severity.HIGH))
-            # NFP: first Friday of the month, 08:30 ET (approximate; BLS occasionally shifts it)
-            if d.weekday() == 4 and d.day <= 7:
+            if d.weekday() == 4 and d.day <= 7 and (d.year, d.month) not in self._nfp_months:
                 out.append(MacroEvent(name="Nonfarm Payrolls (approx. date)", kind=MacroEventKind.NFP,
-                                      scheduled_at=et_to_utc(datetime.combine(d, time(8, 30))), severity=Severity.HIGH))
+                                      scheduled_at=et_to_utc(datetime.combine(d, time(8, 30))), severity=Severity.HIGH,
+                                      source="rule"))
             d += timedelta(days=1)
+        out.extend(self._fetched)
         out.extend(self._user)
         return sorted((e for e in out if start <= e.scheduled_at <= end), key=lambda e: e.scheduled_at)
+
+    def coverage_warnings(self, now: datetime, horizon_days: int = 60) -> list[str]:
+        """FOMC meets every ~6-7 weeks; no known decision in the next 60 days means the
+        calendar has run out, and the intraday blackout gate is blind."""
+        today = to_et(now).date()
+        future = sorted(d for d in self.fomc_dates if d >= today)
+        warnings = []
+        if not future or (future[0] - today).days > horizon_days:
+            last = max(self.fomc_dates) if self.fomc_dates else None
+            warnings.append(
+                f"FOMC calendar coverage ends {last}: refresh it (network) or add dates to data/macro_events.yaml"
+            )
+        cpi_known = any(e.kind is MacroEventKind.CPI and e.scheduled_at >= ensure_utc(now) for e in self._fetched)
+        if not cpi_known:
+            warnings.append("No upcoming CPI dates known (BLS schedule not fetched); pre-open blackouts rely on rules")
+        return warnings
 
 
 def _item(ticker: str | None, headline: str, source: str, published: datetime, url: str | None = None,
