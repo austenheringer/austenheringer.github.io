@@ -29,6 +29,7 @@ from warroom.agents.jarvis_interface import SETUP_NAMES, JarvisInterface
 from warroom.agents.news_agent import BlackoutResult, NewsAgent
 from warroom.agents.risk_agent import PortfolioView, RiskAgent, RiskNotes
 from warroom.agents.technical_agent import MacroBias, TechnicalAgent, TickerContext
+from warroom.core.assets import format_price, format_qty
 from warroom.core.clock import Clock, to_et
 from warroom.core.event_bus import EventBus
 from warroom.models.schemas import (
@@ -259,7 +260,7 @@ class WarRoom:
         if notes.stop_pct is not None and (notes.stop_atr_multiple >= 1.4 or notes.stop_pct > 0.02):
             point = f"stop is {notes.stop_atr_multiple:.2f}x ATR ({notes.stop_pct:.2%}) away ({notes.stop_source})"
             await self._say(msgs, did, tk, R, 2, Stance.CHALLENGE,
-                            f"The {point}; size drops to {risk.position_size} shares.", recipient=T, point=point)
+                            f"The {point}; size drops to {format_qty(tk, risk.position_size)}.", recipient=T, point=point)
             await self._say(msgs, did, tk, T, 2, Stance.DEFEND,
                             "The stop sits where the structure is; anything tighter would live inside the noise.",
                             recipient=R)
@@ -310,11 +311,15 @@ class WarRoom:
         if a.stop_loss is None or a.tp1 is None:
             core = "Levels could not be computed."
         else:
+            tk = a.ticker
+            px = lambda v: format_price(tk, v)  # noqa: E731
+            q = lambda v: format_qty(tk, v)  # noqa: E731
             rr = f"{a.reward_risk:.2f}" if a.reward_risk is not None else "n/a"
-            core = (f"Entry {a.entry:.2f} ({n.entry_basis}), stop {a.stop_loss:.2f} ({n.stop_source}, "
-                    f"{n.stop_atr_multiple:.2f}x ATR), TP1 {a.tp1:.2f}, TP2 {a.tp2:.2f}; R:R {rr} to TP1. "
-                    f"Size {a.position_size} shares (risk cap {a.risk_shares}, buying-power cap "
-                    f"{a.buying_power_shares}), ${a.dollar_risk:,.2f} at risk.")
+            fees = f" after fees (${n.est_fees:,.2f} round trip)" if n.est_fees else ""
+            core = (f"Entry {px(a.entry)} ({n.entry_basis}), stop {px(a.stop_loss)} ({n.stop_source}, "
+                    f"{n.stop_atr_multiple:.2f}x ATR), TP1 {px(a.tp1)}, TP2 {px(a.tp2)}; R:R {rr} to TP1{fees}. "
+                    f"Size {q(a.position_size)} (risk cap {q(a.risk_shares)}, buying-power cap "
+                    f"{q(a.buying_power_shares)}), ${a.dollar_risk:,.2f} at risk.")
         if preliminary and a.veto_reasons:
             core += " Flags: " + "; ".join(a.veto_reasons) + "."
         if a.warnings:
@@ -338,8 +343,9 @@ class WarRoom:
             return TradePlan(status=PlanStatus.WATCHLIST, position_size=a.position_size, dollar_risk=a.dollar_risk,
                              summary=reason, **base)
         return TradePlan(status=PlanStatus.APPROVED, position_size=a.position_size, dollar_risk=a.dollar_risk,
-                         summary=(f"{a.position_size} shares, entry {a.entry:.2f}, stop {a.stop_loss:.2f}, "
-                                  f"TP1 {a.tp1:.2f}, TP2 {a.tp2:.2f}, risking ${a.dollar_risk:,.2f}"), **base)
+                         summary=(f"{format_qty(a.ticker, a.position_size)}, entry {format_price(a.ticker, a.entry)}, "
+                                  f"stop {format_price(a.ticker, a.stop_loss)}, TP1 {format_price(a.ticker, a.tp1)}, "
+                                  f"TP2 {format_price(a.ticker, a.tp2)}, risking ${a.dollar_risk:,.2f}"), **base)
 
     @staticmethod
     def _plan_stance(status: PlanStatus) -> Stance:

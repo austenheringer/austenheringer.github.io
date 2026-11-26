@@ -16,6 +16,29 @@ demo:
   speed_multiplier: 10              # 10 clock-seconds per real second (~40 min for a full session)
   scan_interval_seconds: 60         # in CLOCK seconds (6 real seconds at 10x)
 
+crypto:
+  # 24/7 spot crypto alongside equities. Same paper account and portfolio-wide limits.
+  enabled: true
+  exchange: kraken                  # fees, lot sizes and minimum orders model Kraken spot
+  data_provider: kraken             # kraken (free public data, no keys) | mock. --demo always uses mock.
+  symbols: [BTC-USD, ETH-USD, SOL-USD]
+  macro_symbol: BTC-USD             # crypto trend bias (the SPY/QQQ of crypto)
+  taker_fee_pct: 0.004              # Kraken Pro base tier: 0.40% taker (market orders, stops)
+  maker_fee_pct: 0.0025             # 0.25% maker (resting limit targets)
+  max_spread_pct: 0.002             # 0.20%
+  allow_short: false                # spot accounts cannot short; short setups are vetoed
+  max_open_positions: 2             # crypto cap inside the global risk.max_open_positions
+  max_hold_minutes: 240             # no closing bell: a time stop instead of the EOD flat
+  weekend_risk_multiplier: 0.5      # thinner weekend books: half the risk per trade
+  range_lookback_minutes: 240       # rolling range for crypto breakout/breakdown setups
+  news_feeds:
+    - https://www.coindesk.com/arc/outboundfeeds/rss/
+    - https://cointelegraph.com/rss
+  instruments:                      # Kraken defaults; refreshed from Kraken AssetPairs in --paper
+    BTC-USD: {qty_step: 0.00000001, min_qty: 0.00005, min_notional: 0.5, price_decimals: 1}
+    ETH-USD: {qty_step: 0.00000001, min_qty: 0.002, min_notional: 0.5, price_decimals: 2}
+    SOL-USD: {qty_step: 0.00000001, min_qty: 0.02, min_notional: 0.5, price_decimals: 2}
+
 account:
   starting_equity: 100000.0
   starting_cash: 100000.0
@@ -83,6 +106,7 @@ execution:
   commission_min: 0.0
   short_margin_requirement: 1.5     # Reg-T style: reserve 150% of short notional
   eod_flat_minutes_before_close: 5  # 15:55 ET normal day, 12:55 ET early close
+  live_trading_enabled: false       # real-money execution is not implemented (docs/LIVE_TRADING_PLAN.md)
 
 providers:
   market_data: mock                 # mock | yfinance | alpaca

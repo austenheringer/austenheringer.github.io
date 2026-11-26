@@ -23,6 +23,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Input, RichLog, Static
 
+from warroom.core.assets import format_price, format_qty
 from warroom.core.clock import to_et
 from warroom.core.event_bus import BusClosed
 from warroom.models.schemas import (
@@ -189,7 +190,7 @@ class WarRoomApp(App):
             what = "ENTRY" if f.is_entry else f"EXIT {f.reason.value if f.reason else ''}"
             pnl = "" if f.is_entry else f"  P&L {f.realized_pnl - f.commission:+,.2f}"
             self.query_one("#jarvis", RichLog).write(Text(
-                f"{to_et(f.timestamp):%H:%M} [PAPER {what}] {f.ticker} {e.position.direction.value} {f.qty} @ {f.price:.2f}{pnl}",
+                f"{to_et(f.timestamp):%H:%M} [PAPER {what}] {f.ticker} {e.position.direction.value} {format_qty(f.ticker, f.qty)} @ {format_price(f.ticker, f.price)}{pnl}",
                 style="bold green" if f.is_entry or (f.realized_pnl - f.commission) >= 0 else "bold red"))
             self._render_positions()
         elif isinstance(e, SystemAlert):

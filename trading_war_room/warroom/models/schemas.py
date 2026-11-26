@@ -69,6 +69,8 @@ class SetupType(StrEnum):
     ORB_BREAKDOWN = "ORB_BREAKDOWN"
     EMA_PULLBACK = "EMA_PULLBACK"
     RVOL_MOMENTUM = "RVOL_MOMENTUM"
+    RANGE_BREAKOUT = "RANGE_BREAKOUT"    # crypto: break of the rolling multi-hour range
+    RANGE_BREAKDOWN = "RANGE_BREAKDOWN"
 
 
 class AgentRole(StrEnum):
@@ -123,6 +125,7 @@ class ExitReason(StrEnum):
     TP2 = "TP2"
     EOD_FLAT = "EOD_FLAT"
     MANUAL_FLATTEN = "MANUAL_FLATTEN"
+    TIME_STOP = "TIME_STOP"              # crypto: maximum holding time reached
 
 
 class AlertLevel(StrEnum):
@@ -240,6 +243,8 @@ class IndicatorSnapshot(_Frozen):
     spread_pct: float | None = Field(default=None, ge=0)
     swing_high: float | None = None
     swing_low: float | None = None
+    range_high: float | None = None   # crypto: rolling range (excludes the last bar)
+    range_low: float | None = None
 
     @property
     def vwap_distance_pct(self) -> float | None:
@@ -312,9 +317,9 @@ class RiskAssessment(_Frozen):
     stop_loss: float | None = None
     tp1: float | None = None
     tp2: float | None = None
-    risk_shares: int = 0
-    buying_power_shares: int = 0
-    position_size: int = 0
+    risk_shares: float = 0       # "shares" = units (fractional for crypto)
+    buying_power_shares: float = 0
+    position_size: float = 0
     dollar_risk: float = 0.0
     reward_risk: float | None = None
 
@@ -328,8 +333,8 @@ class RiskAssessment(_Frozen):
             reason = validate_levels(self.direction, self.entry, self.stop_loss, self.tp1, self.tp2)  # type: ignore[arg-type]
             if reason:
                 raise ValueError(reason)
-            if self.position_size < 1:
-                raise ValueError("approved assessment requires position_size >= 1")
+            if self.position_size <= 0:
+                raise ValueError("approved assessment requires a positive position size")
         return self
 
 
@@ -373,7 +378,7 @@ class TradePlan(_Frozen):
     stop_loss: float | None = None
     tp1: float | None = None
     tp2: float | None = None
-    position_size: int = Field(default=0, ge=0)
+    position_size: float = Field(default=0, ge=0)
     dollar_risk: float = Field(default=0.0, ge=0)
     reward_risk: float | None = None
     veto_reasons: list[str] = Field(default_factory=list)
@@ -388,8 +393,8 @@ class TradePlan(_Frozen):
             reason = validate_levels(self.direction, self.entry, self.stop_loss, self.tp1, self.tp2)  # type: ignore[arg-type]
             if reason:
                 raise ValueError(f"APPROVED plan has invalid levels: {reason}")
-            if self.position_size < 1:
-                raise ValueError("APPROVED plan requires position_size >= 1")
+            if self.position_size <= 0:
+                raise ValueError("APPROVED plan requires a positive position size")
             if self.veto_reasons:
                 raise ValueError("APPROVED plan cannot carry veto reasons")
         return self
@@ -427,8 +432,8 @@ class Position(_Mutable):
     stop_loss: PositivePrice
     tp1: PositivePrice
     tp2: PositivePrice
-    initial_qty: int = Field(ge=1)
-    qty: int = Field(ge=0)
+    initial_qty: float = Field(gt=0)
+    qty: float = Field(ge=0)
     tp1_hit: bool = False
     reserved_margin: float = Field(default=0.0, ge=0)
     realized_pnl: float = 0.0
@@ -452,7 +457,7 @@ class Fill(_Frozen):
     ticker: str
     direction: Direction  # direction of the POSITION, not the order side
     is_entry: bool
-    qty: int = Field(ge=1)
+    qty: float = Field(gt=0)
     price: PositivePrice
     commission: float = Field(ge=0)
     realized_pnl: float = 0.0

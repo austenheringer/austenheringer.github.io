@@ -158,6 +158,7 @@ class RiskNotes:
     entry_basis: str = ""
     data_age_seconds: float | None = None
     stop_pct: float | None = None
+    est_fees: float = 0.0
 
 
 class RiskAgent:

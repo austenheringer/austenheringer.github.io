@@ -48,6 +48,11 @@ _PHRASES: dict[str, float] = {
     "loss widens": -0.5, "wider loss": -0.5, "swings to loss": -0.6, "dividend cut": -0.6, "cuts dividend": -0.6,
     "suspends dividend": -0.7, "profit warning": -0.7, "accounting irregularities": -0.8, "short report": -0.6,
     "secondary offering": -0.4, "stock offering": -0.4, "deal collapses": -0.6, "drops bid": -0.5,
+    # crypto-specific
+    "etf approval": 0.8, "approves spot etf": 0.8, "etf inflows": 0.5, "record inflows": 0.5,
+    "exchange listing": 0.4, "network upgrade": 0.3, "short liquidations": 0.4, "all-time high": 0.5,
+    "etf outflows": -0.5, "long liquidations": -0.5, "exchange hack": -0.9, "withdrawals paused": -0.8,
+    "halts withdrawals": -0.8, "rug pull": -0.9, "loses peg": -0.8, "sec sues": -0.7, "regulator sues": -0.6,
     # weak / ambiguous constructions
     "beats low expectations": 0.15, "in line with estimates": 0.0, "in-line": 0.0, "meets estimates": 0.05,
 }
@@ -64,7 +69,7 @@ _POS_WORDS: dict[str, float] = {
     "rallies": 0.4, "climbs": 0.3, "rises": 0.25, "gains": 0.3, "upgrade": 0.5, "upgrades": 0.5,
     "upgraded": 0.5, "beat": 0.4, "beats": 0.4, "tops": 0.3, "record": 0.3, "growth": 0.2, "bullish": 0.4,
     "outperform": 0.4, "partnership": 0.3, "approval": 0.4, "approves": 0.4, "approved": 0.4, "profit": 0.2,
-    "strong": 0.25, "win": 0.3, "won": 0.3, "approve": 0.4, "higher": 0.2, "boost": 0.3, "boosts": 0.3, "accelerates": 0.3, "expands": 0.2, "wins": 0.3, "breakthrough": 0.5,
+    "strong": 0.25, "win": 0.3, "won": 0.3, "approve": 0.4, "higher": 0.2, "boost": 0.3, "boosts": 0.3, "accelerates": 0.3, "expands": 0.2, "wins": 0.3, "breakthrough": 0.5, "inflows": 0.3, "accumulate": 0.3, "listing": 0.2, "adoption": 0.3,
 }
 _NEG_WORDS: dict[str, float] = {
     "plunge": -0.6, "plunges": -0.6, "plummets": -0.7, "tumble": -0.5, "tumbles": -0.5, "slump": -0.5,
@@ -74,7 +79,9 @@ _NEG_WORDS: dict[str, float] = {
     "bearish": -0.4, "layoffs": -0.3, "weak": -0.3, "weaker": -0.3, "warning": -0.4, "warns": -0.4,
     "loss": -0.2, "fraud": -0.8, "bankruptcy": -0.9, "delay": -0.3, "delays": -0.3, "recall": -0.5,
     "recalls": -0.5, "crash": -0.6, "slashes": -0.4, "cut": -0.2, "cuts": -0.2, "resigns": -0.3, "subpoena": -0.5,
-    "breach": -0.4, "rejects": -0.5, "rejected": -0.5, "losses": -0.2, "grounds": -0.4, "stalls": -0.3, "outage": -0.3, "fine": -0.3, "fined": -0.4, "ban": -0.4, "tariff": -0.2, "tariffs": -0.2,
+    "breach": -0.4, "hack": -0.7, "hacked": -0.8, "exploit": -0.7, "exploited": -0.8, "drained": -0.7,
+    "delist": -0.6, "delisting": -0.6, "depeg": -0.8, "insolvency": -0.9, "outflows": -0.3, "sues": -0.4,
+    "liquidations": -0.3, "rejects": -0.5, "rejected": -0.5, "losses": -0.2, "grounds": -0.4, "stalls": -0.3, "outage": -0.3, "fine": -0.3, "fined": -0.4, "ban": -0.4, "tariff": -0.2, "tariffs": -0.2,
 }
 _NEGATORS = {"not", "no", "never", "without", "fails", "failed", "fail", "unable"}
 _DENIALS = {"denies", "denied", "refutes", "dismisses"}  # flip weakly: markets discount denials
@@ -85,6 +92,7 @@ _HIGH_TRIGGERS = (
     "halt", "fda", "merger", "acquisition", "acquire", "acquired", "takeover", "buyout", "bankruptcy",
     "chapter 11", "fraud", "guidance", "outlook", "forecast", "sec ", "doj", "earnings", "fomc",
     "rate decision", "cpi", "payrolls", "going concern", "recall", "profit warning", "short report",
+    "hack", "exploit", "etf", "delist", "depeg", "peg", "withdrawals", "liquidation", "rug pull", "insolvency",
 )
 _MEDIUM_TRIGGERS = (
     "upgrade", "downgrade", "price target", "contract", "partnership", "analyst", "lawsuit", "probe",

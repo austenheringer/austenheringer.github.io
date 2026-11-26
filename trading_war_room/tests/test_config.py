@@ -70,4 +70,10 @@ def test_paper_never_silently_falls_back_to_mock(cal):
     except ImportError:
         with pytest.raises(ConfigError, match="yfinance"):
             factory.build_market_data(yf, Secrets.from_env({}), SystemClock(), cal, Mode.PAPER)
-    assert type(factory.build_market_data(yf, Secrets.from_env({}), SystemClock(), cal, Mode.DEMO)).__name__ == "MockDataProvider"
+    demo = factory.build_market_data(yf, Secrets.from_env({}), SystemClock(), cal, Mode.DEMO)
+    assert type(demo).__name__ == "RoutedMarketData"
+    assert type(demo.equity).__name__ == "MockDataProvider" and type(demo.crypto).__name__ == "MockCryptoProvider"
+    with pytest.raises(ConfigError, match="fake prices"):
+        raw = yf.model_dump(mode="json")
+        raw["crypto"]["data_provider"] = "mock"
+        factory.build_crypto_market_data(parse_config(raw), SystemClock(), Mode.PAPER)

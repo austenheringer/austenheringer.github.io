@@ -28,6 +28,7 @@ from warroom.agents.news_agent import NewsAgent
 from warroom.agents.risk_agent import PortfolioView, RiskAgent
 from warroom.agents.technical_agent import TechnicalAgent, TickerContext
 from warroom.config import AppConfig, Secrets
+from warroom.core.assets import format_price, format_qty
 from warroom.core.clock import Clock, SystemClock, to_et
 from warroom.core.event_bus import EventBus
 from warroom.core.market_calendar import MarketCalendar, MarketStatus
@@ -310,7 +311,8 @@ class Orchestrator:
 
     async def flatten(self) -> list[str]:
         fills = await self.broker.flatten_all(ExitReason.MANUAL_FLATTEN, {t: c.snapshot.price for t, c in self.contexts.items()})
-        return [f"{f.ticker} {f.direction.value.lower()} {f.qty} @ {f.price:.2f} (P&L {f.realized_pnl - f.commission:+.2f})"
+        return [f"{f.ticker} {f.direction.value.lower()} {format_qty(f.ticker, f.qty)} @ {format_price(f.ticker, f.price)} "
+                f"(P&L {f.realized_pnl - f.commission:+.2f})"
                 for f in fills]
 
     async def handle_command(self, text: str) -> str:

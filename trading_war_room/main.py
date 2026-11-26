@@ -124,6 +124,7 @@ async def run_live(args, cfg, secrets, mode) -> int:
 
 
 async def _console_stream(orch) -> None:
+    from warroom.core.assets import format_price, format_qty
     from warroom.core.clock import to_et
     from warroom.models.schemas import JarvisBriefing, SystemAlert, TradeExecuted, WarRoomMessage
 
@@ -138,7 +139,7 @@ async def _console_stream(orch) -> None:
         elif isinstance(e, TradeExecuted):
             f = e.fill
             print(f"{ts} [PAPER {'ENTRY' if f.is_entry else 'EXIT ' + (f.reason.value if f.reason else '')}] "
-                  f"{f.ticker} {f.qty} @ {f.price:.2f}", flush=True)
+                  f"{f.ticker} {format_qty(f.ticker, f.qty)} @ {format_price(f.ticker, f.price)}", flush=True)
         else:
             print(f"{ts} [{e.level.value}] {e.source}: {e.message}", flush=True)
 

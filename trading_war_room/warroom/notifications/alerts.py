@@ -14,6 +14,7 @@ import time as _time
 from abc import ABC, abstractmethod
 
 from warroom.config import AppConfig, HttpSection, Secrets
+from warroom.core.assets import format_price, format_qty
 from warroom.core.event_bus import EventBus, Subscription
 from warroom.models.schemas import AlertLevel, BaseEvent, JarvisBriefing, SystemAlert, TradeExecuted
 from warroom.providers.base import ProviderError
@@ -71,7 +72,7 @@ def format_event(event: BaseEvent, notify_on: set[str]) -> str | None:
         f, p = event.fill, event.position
         action = "OPEN" if f.is_entry else f"CLOSE ({f.reason.value if f.reason else 'exit'})"
         pnl = "" if f.is_entry else f" P&L {f.realized_pnl - f.commission:+.2f}"
-        return f"[Paper {action}] {p.ticker} {p.direction.value} {f.qty} @ {f.price:.2f}{pnl}"
+        return f"[Paper {action}] {p.ticker} {p.direction.value} {format_qty(p.ticker, f.qty)} @ {format_price(p.ticker, f.price)}{pnl}"
     if isinstance(event, SystemAlert) and "CIRCUIT_BREAKER" in notify_on and (
             event.level is AlertLevel.CRITICAL or event.source == "risk"):
         return f"[{event.level.value}] {event.source}: {event.message}"

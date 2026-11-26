@@ -19,6 +19,15 @@ from warroom.core.clock import Clock, DemoClock, et_to_utc
 from warroom.core.market_calendar import MarketCalendar
 from warroom.models.schemas import Mode
 from warroom.providers.base import LLMProvider, MarketDataProvider, NewsProvider, ProviderUnavailable
+from warroom.core.assets import AssetRouter
+from warroom.providers.crypto_data import (
+    CryptoNewsProvider,
+    KrakenDataProvider,
+    MockCryptoNewsProvider,
+    MockCryptoProvider,
+    RoutedMarketData,
+    RoutedNewsProvider,
+)
 from warroom.providers.calendar_feeds import HaltAwareNewsProvider, MacroCalendarUpdater, NasdaqHaltProvider
 from warroom.providers.llm_provider import AnthropicProvider, DialogueEngine, OpenAIProvider
 from warroom.providers.market_data import AlpacaDataProvider, MockDataProvider, YFinanceDataProvider
@@ -66,8 +75,30 @@ def build_demo_clock(cfg: AppConfig, calendar: MarketCalendar, real_now: datetim
     return DemoClock(start, cfg.demo.speed_multiplier)
 
 
+def build_router(cfg: AppConfig, calendar: MarketCalendar) -> AssetRouter:
+    return AssetRouter(calendar, cfg.crypto, cfg.execution.commission_per_share)
+
+
+def build_crypto_market_data(cfg: AppConfig, clock: Clock, mode: Mode) -> MarketDataProvider | None:
+    if not cfg.crypto.enabled or not cfg.crypto.symbols:
+        return None
+    if mode in (Mode.DEMO, Mode.SMOKE) or cfg.crypto.data_provider == "mock":
+        if mode is Mode.PAPER:
+            raise ConfigError("--paper with crypto.data_provider: mock would paper-trade on fake prices; use kraken")
+        return MockCryptoProvider(clock, seed=cfg.providers.mock_seed)
+    return KrakenDataProvider(clock, cfg.http)
+
+
 def build_market_data(cfg: AppConfig, secrets: Secrets, clock: Clock, calendar: MarketCalendar,
                       mode: Mode) -> MarketDataProvider:
+    """Equity provider wrapped with the crypto provider in a symbol router."""
+    equity = build_equity_market_data(cfg, secrets, clock, calendar, mode)
+    crypto = build_crypto_market_data(cfg, clock, mode)
+    return RoutedMarketData(build_router(cfg, calendar), equity, crypto) if crypto is not None else equity
+
+
+def build_equity_market_data(cfg: AppConfig, secrets: Secrets, clock: Clock, calendar: MarketCalendar,
+                             mode: Mode) -> MarketDataProvider:
     choice = "mock" if mode in (Mode.DEMO, Mode.SMOKE) else cfg.providers.market_data
     try:
         if choice == "mock":
@@ -101,6 +132,24 @@ async def build_macro_calendar(cfg: AppConfig, calendar: MarketCalendar, clock: 
 def build_news(cfg: AppConfig, secrets: Secrets, clock: Clock, calendar: MarketCalendar, mode: Mode,
                market: MarketDataProvider | None = None, macro: StaticMacroCalendar | None = None) -> NewsProvider:
     macro = macro or StaticMacroCalendar(calendar)
+    equity_market = market.equity if isinstance(market, RoutedMarketData) else market
+    equity_news = build_equity_news(cfg, secrets, clock, calendar, mode, equity_market, macro)
+    if not (cfg.crypto.enabled and cfg.crypto.symbols):
+        return equity_news
+    crypto_market = market.crypto if isinstance(market, RoutedMarketData) else None
+    if mode in (Mode.DEMO, Mode.SMOKE):
+        crypto_news: NewsProvider = MockCryptoNewsProvider(
+            clock, cfg.crypto.symbols, equity_mock_news=equity_news if isinstance(equity_news, MockNewsProvider) else None,
+            seed=cfg.providers.mock_seed, scenario_fn=getattr(crypto_market, "scenario", None))
+    elif mode is Mode.REPLAY:
+        crypto_news = CalendarOnlyNewsProvider(clock, macro)
+    else:
+        crypto_news = CryptoNewsProvider(clock, cfg.crypto.news_feeds, cfg.http, macro, crypto_market)
+    return RoutedNewsProvider(build_router(cfg, calendar), equity_news, crypto_news)
+
+
+def build_equity_news(cfg: AppConfig, secrets: Secrets, clock: Clock, calendar: MarketCalendar, mode: Mode,
+                      market: MarketDataProvider | None, macro: StaticMacroCalendar) -> NewsProvider:
     if mode in (Mode.DEMO, Mode.SMOKE):
         scenario_fn = market.scenario if isinstance(market, MockDataProvider) else None
         return MockNewsProvider(clock, calendar, cfg.app.tickers, seed=cfg.providers.mock_seed, scenario_fn=scenario_fn)

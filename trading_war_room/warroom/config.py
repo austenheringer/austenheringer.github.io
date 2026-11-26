@@ -65,6 +65,62 @@ class DemoSection(_Section):
         return f"{hh:02d}:{mm:02d}"
 
 
+class CryptoInstrumentSpec(_Section):
+    qty_step: float = Field(gt=0)
+    min_qty: float = Field(ge=0)
+    min_notional: float = Field(default=0.5, ge=0)
+    price_decimals: int = Field(default=2, ge=0, le=10)
+
+
+def _default_crypto_instruments() -> dict[str, CryptoInstrumentSpec]:
+    # Kraken spot defaults (refreshed from Kraken's AssetPairs endpoint in --paper).
+    return {
+        "BTC-USD": CryptoInstrumentSpec(qty_step=1e-8, min_qty=0.00005, min_notional=0.5, price_decimals=1),
+        "ETH-USD": CryptoInstrumentSpec(qty_step=1e-8, min_qty=0.002, min_notional=0.5, price_decimals=2),
+        "SOL-USD": CryptoInstrumentSpec(qty_step=1e-8, min_qty=0.02, min_notional=0.5, price_decimals=2),
+    }
+
+
+class CryptoSection(_Section):
+    enabled: bool = True
+    exchange: Literal["kraken"] = "kraken"
+    data_provider: Literal["kraken", "mock"] = "kraken"   # --demo / --smoke-test always use mock
+    symbols: list[str] = Field(default_factory=lambda: ["BTC-USD", "ETH-USD", "SOL-USD"], max_length=20)
+    macro_symbol: str = "BTC-USD"                          # crypto regime / trend bias
+    taker_fee_pct: float = Field(default=0.004, ge=0, le=0.02)   # Kraken Pro base tier
+    maker_fee_pct: float = Field(default=0.0025, ge=0, le=0.02)
+    max_spread_pct: float = Field(default=0.002, gt=0, le=0.05)
+    allow_short: bool = False                              # spot: no shorting
+    max_open_positions: int = Field(default=2, ge=0, le=20)
+    max_hold_minutes: int = Field(default=240, ge=5, le=7 * 24 * 60)
+    weekend_risk_multiplier: float = Field(default=0.5, ge=0, le=1)
+    range_lookback_minutes: int = Field(default=240, ge=30, le=24 * 60)
+    news_feeds: list[str] = Field(default_factory=lambda: [
+        "https://www.coindesk.com/arc/outboundfeeds/rss/", "https://cointelegraph.com/rss"])
+    instruments: dict[str, CryptoInstrumentSpec] = Field(default_factory=_default_crypto_instruments)
+
+    @field_validator("symbols", "macro_symbol")
+    @classmethod
+    def _pairs(cls, v):
+        from warroom.core.assets import CRYPTO_SYMBOL_RE
+
+        items = [v] if isinstance(v, str) else v
+        out = []
+        for s in items:
+            s = s.strip().upper()
+            if not CRYPTO_SYMBOL_RE.match(s):
+                raise ValueError(f"crypto pair must look like BTC-USD, got {s!r}")
+            if s not in out:
+                out.append(s)
+        return out[0] if isinstance(v, str) else out
+
+    @model_validator(mode="after")
+    def _fees(self) -> "CryptoSection":
+        if self.maker_fee_pct > self.taker_fee_pct:
+            raise ValueError("maker_fee_pct should not exceed taker_fee_pct")
+        return self
+
+
 class AccountSection(_Section):
     starting_equity: float = Field(default=100_000.0, gt=0)
     starting_cash: float = Field(default=100_000.0, gt=0)
@@ -164,6 +220,16 @@ class ExecutionSection(_Section):
     commission_min: float = Field(default=0.0, ge=0)
     short_margin_requirement: float = Field(default=1.5, ge=1.0, le=3.0)
     eod_flat_minutes_before_close: int = Field(default=5, ge=1, le=60)
+    # Real-money execution is NOT implemented. This switch exists so the config schema already
+    # has a place for it; any value other than false is rejected. See docs/LIVE_TRADING_PLAN.md.
+    live_trading_enabled: bool = False
+
+    @field_validator("live_trading_enabled")
+    @classmethod
+    def _no_live(cls, v: bool) -> bool:
+        if v:
+            raise ValueError("live trading is not implemented; paper only (see docs/LIVE_TRADING_PLAN.md)")
+        return v
 
 
 class ProvidersSection(_Section):
@@ -232,6 +298,7 @@ class CalendarSection(_Section):
 class AppConfig(_Section):
     app: AppSection = Field(default_factory=AppSection)
     demo: DemoSection = Field(default_factory=DemoSection)
+    crypto: CryptoSection = Field(default_factory=CryptoSection)
     account: AccountSection = Field(default_factory=AccountSection)
     risk: RiskSection = Field(default_factory=RiskSection)
     technical: TechnicalSection = Field(default_factory=TechnicalSection)
@@ -250,6 +317,9 @@ class AppConfig(_Section):
         overlap = set(self.app.tickers) & set(self.app.macro_tickers)
         if overlap:
             raise ValueError(f"tickers and macro_tickers overlap: {sorted(overlap)}")
+        clash = set(self.crypto.symbols) & (set(self.app.tickers) | set(self.app.macro_tickers))
+        if clash:
+            raise ValueError(f"crypto symbols clash with equity tickers: {sorted(clash)}")
         return self
 
 

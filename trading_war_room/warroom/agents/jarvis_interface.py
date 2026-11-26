@@ -17,6 +17,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from warroom.config import AppConfig
+from warroom.core.assets import format_price, format_qty
 from warroom.models.schemas import (
     AgentRole,
     MarketRegime,
@@ -121,7 +122,7 @@ HELP_TEXT = (
 class PositionLine:
     ticker: str
     direction: str
-    qty: int
+    qty: float
     entry: float
     stop: float
     tp1: float
@@ -183,11 +184,13 @@ class JarvisInterface:
             first = disagreements[0]
             dispute = f" {first.sender.value.title()} challenged it: {first.data_payload.get('point', 'see transcript')}."
         if p.status is PlanStatus.APPROVED:
-            return (f"{self.title}, {t.ticker} presents {_a(setup)} {side}.{dispute} Risk approved: entry {p.entry:.2f}, "
-                    f"stop {p.stop_loss:.2f}, targets {p.tp1:.2f} and {p.tp2:.2f}. "
-                    f"{p.position_size} shares, risking {_money(p.dollar_risk)}.")
+            px = lambda v: format_price(t.ticker, v)  # noqa: E731
+            return (f"{self.title}, {t.ticker} presents {_a(setup)} {side}.{dispute} Risk approved: entry {px(p.entry)}, "
+                    f"stop {px(p.stop_loss)}, targets {px(p.tp1)} and {px(p.tp2)}. "
+                    f"{format_qty(t.ticker, p.position_size)}, risking {_money(p.dollar_risk)}.")
         if p.status is PlanStatus.WATCHLIST:
-            levels = (f" Levels for reference: entry {p.entry:.2f}, stop {p.stop_loss:.2f}, TP1 {p.tp1:.2f}."
+            levels = (f" Levels for reference: entry {format_price(t.ticker, p.entry)}, stop "
+                      f"{format_price(t.ticker, p.stop_loss)}, TP1 {format_price(t.ticker, p.tp1)}."
                       if p.entry and p.stop_loss and p.tp1 else "")
             return (f"{self.title}, {t.ticker} {side} goes on the watchlist rather than the book: {p.summary}.{dispute}"
                     f"{levels} {self._wit(t.debate_id)}")
@@ -203,7 +206,8 @@ class JarvisInterface:
 
     def status_draft(self, s: StatusReport) -> str:
         pos = "no open positions" if not s.positions else "; ".join(
-            f"{p.ticker} {p.direction.lower()} {p.qty} @ {p.entry:.2f} (stop {p.stop:.2f}, P&L {_money(p.unrealized)})"
+            f"{p.ticker} {p.direction.lower()} {format_qty(p.ticker, p.qty)} @ {format_price(p.ticker, p.entry)} "
+            f"(stop {format_price(p.ticker, p.stop)}, P&L {_money(p.unrealized)})"
             for p in s.positions)
         return (f"{self.title}, {s.mode} mode. Equity {_money(s.equity)}, day P&L {_money(s.day_pnl)} "
                 f"({s.day_pnl_pct:+.2%}). {pos[:1].upper() + pos[1:]}. Market regime {s.regime.value.replace('_', '-').lower()}, "
@@ -221,7 +225,7 @@ class JarvisInterface:
         if p.status is PlanStatus.WATCHLIST:
             return f"{self.title}, {t.ticker} was not vetoed; it was parked on the watchlist: {p.summary}."
         return (f"{self.title}, {t.ticker} was approved, not vetoed: R:R {p.reward_risk:.2f} to TP1, "
-                f"{p.position_size} shares risking {_money(p.dollar_risk)}.")
+                f"{format_qty(t.ticker, p.position_size)} risking {_money(p.dollar_risk)}.")
 
     @staticmethod
     def format_transcript(t: WarRoomTranscript) -> str:

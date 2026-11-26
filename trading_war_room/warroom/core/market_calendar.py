@@ -52,7 +52,7 @@ class TradingSession:
     day: date
     open: datetime       # UTC
     orb_end: datetime    # UTC
-    eod_flat: datetime   # UTC
+    eod_flat: datetime | None   # UTC; None = no end-of-day flat (24/7 crypto)
     close: datetime      # UTC
     early_close: bool
 
@@ -65,7 +65,7 @@ class TradingSession:
         return self.open <= dt < self.orb_end
 
     def past_eod_flat(self, dt: datetime) -> bool:
-        return ensure_utc(dt) >= self.eod_flat
+        return self.eod_flat is not None and ensure_utc(dt) >= self.eod_flat
 
 
 def _easter(year: int) -> date:
