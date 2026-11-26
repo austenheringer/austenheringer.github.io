@@ -9,10 +9,29 @@ const store = {
     try { const v = localStorage.getItem("vega." + key); return v === null ? fallback : JSON.parse(v); }
     catch { return fallback; }
   },
+  // Returns false when the browser refuses (quota full, private mode).
   set(key, value) {
-    try { localStorage.setItem("vega." + key, JSON.stringify(value)); } catch { /* private mode */ }
+    try { localStorage.setItem("vega." + key, JSON.stringify(value)); return true; } catch { return false; }
   },
 };
+
+// Browsers allow roughly 5 MB per site; leave room for settings and memory.
+const MAX_HISTORY_BYTES = 3_500_000;
+let historySaveWarned = false;
+
+function saveHistory(msgs) {
+  const json = JSON.stringify(msgs);
+  const ok = json.length <= MAX_HISTORY_BYTES && store.set("history", msgs);
+  if (!ok) {
+    store.set("history", []); // never leave a stale, half-saved conversation behind
+    if (!historySaveWarned) {
+      historySaveWarned = true;
+      addMessage("vega error",
+        "This conversation is now too large to save in your browser. It keeps working until you close the tab, " +
+        "but it won't be restored after a reload. Tap **New** to start a fresh conversation that saves normally.");
+    }
+  }
+}
 
 const settings = {
   apiKey: store.get("apiKey", ""),
@@ -27,6 +46,9 @@ const settings = {
 
 // Specialist sub-agents use a cheaper, faster model than the main assistant.
 const WORKER_MODEL = "claude-sonnet-5-5";
+
+// Summarise older conversation once a request would exceed this many input tokens.
+const COMPACT_AT_TOKENS = 80_000;
 
 // ---------------------------------------------------------------- DOM
 const $ = (id) => document.getElementById(id);
@@ -67,6 +89,7 @@ function addToolNote(text) {
   el.innerHTML = text; // callers pass escaped content only
   logEl.appendChild(el);
   logEl.scrollTop = logEl.scrollHeight;
+  return el;
 }
 
 // ---------------------------------------------------------------- memory
@@ -153,8 +176,9 @@ function startRecognition() {
   recognizer.onend = () => {
     recognizer = null;
     micBtn.classList.remove("on");
-    if (settings.wake && !pushToTalk) setTimeout(startRecognition, 300); // keep listening
     pushToTalk = false;
+    // Resume wake-word listening after any session ends, including push-to-talk.
+    if (settings.wake) setTimeout(() => { if (!recognizer && settings.wake) startRecognition(); }, 300);
     if (!busy && !speaking) setState(settings.wake ? "listening" : "idle", settings.wake ? "Say “Vega…”" : undefined);
   };
   recognizer.onerror = (e) => {
@@ -173,7 +197,14 @@ function stopRecognition() { try { recognizer?.stop(); } catch { /* already stop
 micBtn.addEventListener("click", () => {
   stopSpeaking();
   if (recognizer && pushToTalk) { stopRecognition(); return; }
-  if (recognizer) { recognizer.onend = null; stopRecognition(); recognizer = null; }
+  if (recognizer) {
+    // Pause the wake-word listener; start push-to-talk once it has fully stopped.
+    const r = recognizer;
+    r.onend = () => { recognizer = null; pushToTalk = true; startRecognition(); };
+    r.onresult = null;
+    try { r.stop(); } catch { recognizer = null; pushToTalk = true; startRecognition(); }
+    return;
+  }
   pushToTalk = true;
   startRecognition();
 });
@@ -290,12 +321,21 @@ function supportsFallbacks(model) {
   return /^claude-(opus-5|sonnet-5-5|fable-5)/.test(model);
 }
 
-async function runSpecialist(agent, task, signal) {
+// Describe a finished server-tool call in a few words for the progress line.
+function describeServerTool(name, input) {
+  if (name === "web_search") return `searching “${input.query ?? "…"}”`;
+  if (name === "web_fetch") { try { return `reading ${new URL(input.url).hostname}`; } catch { return "reading a page"; } }
+  if (/code_execution/.test(name)) return "running code";
+  return name;
+}
+
+async function runSpecialist(agent, task, signal, progress = () => {}) {
   const spec = SPECIALISTS[agent];
   const messages = [{ role: "user", content: task }];
   const betas = supportsFallbacks(WORKER_MODEL) ? ["server-side-fallback-2026-07-01"] : [];
+  progress("starting…");
   for (let turn = 0; turn < 8; turn++) {
-    const response = await client().beta.messages.create({
+    const stream = client().beta.messages.stream({
       model: WORKER_MODEL,
       max_tokens: 16000,
       system: spec.system,
@@ -304,7 +344,24 @@ async function runSpecialist(agent, task, signal) {
       output_config: { effort: "medium" },
       ...(betas.length ? { betas, fallbacks: "default" } : {}),
     }, { signal });
-    if (response.stop_reason === "pause_turn") { messages.push({ role: "assistant", content: response.content }); continue; }
+    const pending = {}; // index -> { name, json }
+    for await (const event of stream) {
+      if (event.type === "content_block_start") {
+        const b = event.content_block;
+        if (b.type === "server_tool_use") { pending[event.index] = { name: b.name, json: "" }; progress(describeServerTool(b.name, {})); }
+        else if (b.type === "text") progress("writing up…");
+      } else if (event.type === "content_block_delta" && event.delta.type === "input_json_delta" && pending[event.index]) {
+        pending[event.index].json += event.delta.partial_json;
+      } else if (event.type === "content_block_stop" && pending[event.index]) {
+        const p = pending[event.index];
+        let input = {};
+        try { input = JSON.parse(p.json || "{}"); } catch { /* partial input: show generic label */ }
+        progress(describeServerTool(p.name, input));
+        delete pending[event.index];
+      }
+    }
+    const response = await stream.finalMessage();
+    if (response.stop_reason === "pause_turn") { messages.push({ role: "assistant", content: response.content }); progress("still working…"); continue; }
     if (response.stop_reason === "refusal") return `The ${agent} declined this task.`;
     return response.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim() || "(no output)";
   }
@@ -372,7 +429,7 @@ const LOCAL_TOOLS = [
       properties: { agent: { type: "string", enum: Object.keys(SPECIALISTS) }, task: { type: "string" } },
       required: ["agent", "task"],
     },
-    run: ({ agent, task }, signal) => runSpecialist(agent, task, signal),
+    run: ({ agent, task }, { signal, progress }) => runSpecialist(agent, task, signal, progress),
   },
 ];
 
@@ -391,13 +448,13 @@ function buildTools(model) {
   return [...local, ...serverWebTools(model), ...mcp];
 }
 
-async function runLocalTool(block, signal) {
+async function runLocalTool(block, ctx) {
   const tool = LOCAL_TOOLS.find((t) => t.name === block.name);
   if (!tool) return { type: "tool_result", tool_use_id: block.id, content: `Unknown tool ${block.name}`, is_error: true };
   const problem = validate(tool.input_schema, block.input);
   if (problem) return { type: "tool_result", tool_use_id: block.id, content: `Invalid input: ${problem}`, is_error: true };
   try {
-    const out = await tool.run(block.input, signal);
+    const out = await tool.run(block.input, ctx);
     return { type: "tool_result", tool_use_id: block.id, content: typeof out === "string" ? out : JSON.stringify(out) };
   } catch (err) {
     return { type: "tool_result", tool_use_id: block.id, content: String(err.message ?? err), is_error: true };
@@ -439,7 +496,9 @@ async function runTurn(userText) {
   messages.push({ role: "user", content: userText });
   const model = settings.model;
   const mcp = mcpServers();
-  const betas = [];
+  // Compaction: once the conversation passes the trigger, the API summarises older
+  // turns server-side so each request stays small and cheap.
+  const betas = ["compact-2026-01-12"];
   if (supportsFallbacks(model)) betas.push("server-side-fallback-2026-07-01");
   if (mcp.length) betas.push("mcp-client-2025-11-20");
 
@@ -457,7 +516,14 @@ async function runTurn(userText) {
         messages,
         cache_control: { type: "ephemeral" },
         output_config: { effort: settings.effort },
-        ...(betas.length ? { betas } : {}),
+        context_management: {
+          edits: [{
+            type: "compact_20260112",
+            trigger: { type: "input_tokens", value: COMPACT_AT_TOKENS },
+            instructions: "Keep the user's stated goals, decisions, preferences, open tasks, and any names, numbers, dates and URLs that may matter later.",
+          }],
+        },
+        betas,
         ...(betas.includes("server-side-fallback-2026-07-01") ? { fallbacks: "default" } : {}),
         ...(mcp.length ? { mcp_servers: mcp } : {}),
       }, { signal: abort.signal });
@@ -469,6 +535,7 @@ async function runTurn(userText) {
           if (b.type === "text") { text = ""; bubble = addMessage("vega"); }
           else if (b.type === "server_tool_use") addToolNote(`<b>${escapeHtml(b.name)}</b> running…`);
           else if (b.type === "mcp_tool_use") addToolNote(`<b>${escapeHtml(b.server_name)} · ${escapeHtml(b.name)}</b>`);
+          else if (b.type === "compaction") addToolNote("<b>memory</b> summarising earlier conversation to keep things fast…");
         } else if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
           text += event.delta.text;
           bubble.innerHTML = renderMarkdown(text);
@@ -493,14 +560,33 @@ async function runTurn(userText) {
       if (response.stop_reason !== "tool_use") break;
 
       const calls = response.content.filter((b) => b.type === "tool_use");
-      for (const c of calls) {
-        const detail = c.name === "delegate" ? `${c.input?.agent ?? "?"} agent on it…` : JSON.stringify(c.input ?? {}).slice(0, 120);
-        addToolNote(`<b>${escapeHtml(c.name)}</b> ${escapeHtml(detail)}`);
-      }
-      const results = await Promise.all(calls.map((c) => runLocalTool(c, abort.signal)));
+      const signal = abort.signal;
+      const results = await Promise.all(calls.map((c) => {
+        if (c.name !== "delegate") {
+          addToolNote(`<b>${escapeHtml(c.name)}</b> ${escapeHtml(JSON.stringify(c.input ?? {}).slice(0, 120))}`);
+          return runLocalTool(c, { signal });
+        }
+        // Live progress line for specialist agents, with elapsed time.
+        const agent = String(c.input?.agent ?? "agent");
+        const note = addToolNote("");
+        const started = Date.now();
+        let last = "starting…";
+        const paint = () => {
+          const secs = Math.round((Date.now() - started) / 1000);
+          note.innerHTML = `<b>${escapeHtml(agent)}</b> ${escapeHtml(last)} <span class="elapsed">${secs}s</span>`;
+        };
+        paint();
+        const ticker = setInterval(paint, 1000);
+        const progress = (text) => { last = text; paint(); setState("thinking", `${agent}: ${text}`); };
+        return runLocalTool(c, { signal, progress }).finally(() => {
+          clearInterval(ticker);
+          last = "done";
+          paint();
+        });
+      }));
       messages.push({ role: "user", content: results }); // all results in one message
     }
-    store.set("history", messages);
+    saveHistory(messages);
   } catch (err) {
     messages.length = turnStart; // roll back the partial turn
     if (err instanceof Anthropic.APIUserAbortError) { addToolNote("(stopped)"); return; }
@@ -536,7 +622,7 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") { abort?.a
 
 $("newChat").addEventListener("click", () => {
   abort?.abort(); stopSpeaking();
-  messages = []; store.set("history", []);
+  messages = []; store.set("history", []); historySaveWarned = false;
   logEl.innerHTML = "";
   greet();
 });
