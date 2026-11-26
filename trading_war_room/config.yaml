@@ -5,8 +5,15 @@ app:
   user_title: "Sir"                 # how J.A.R.V.I.S. addresses you
   tickers: [AAPL, NVDA, TSLA, AMD, MSFT]
   macro_tickers: [SPY, QQQ]         # regime / trend bias
-  scan_interval_seconds: 15         # orchestrator cycle cadence in demo/paper
+  scan_interval_seconds: 15         # orchestrator cycle cadence in --paper (real seconds)
   log_level: INFO
+
+demo:
+  # --demo replays the most recent trading session on a sped-up wall clock so it is
+  # watchable at any hour (a real-time clock at night/holidays would never see an open market).
+  start_time_et: "09:50"
+  speed_multiplier: 10              # 10 clock-seconds per real second (~40 min for a full session)
+  scan_interval_seconds: 60         # in CLOCK seconds (6 real seconds at 10x)
 
 account:
   starting_equity: 100000.0
@@ -15,16 +22,29 @@ account:
 risk:
   max_risk_pct: 0.01                # 1.0% of equity risked per trade
   max_position_pct: 0.25            # max 25% of available cash in one position
-  min_reward_risk: 2.0              # measured entry -> TP1 (conservative: first target must pay 2R)
+  min_reward_risk: 2.0              # measured entry -> TP1 AFTER structural capping (see target_policy)
   atr_stop_multiplier: 1.5
+  # stop_policy:
+  #   structure_within_atr - use the swing low/high (+buffer) unless it is farther than
+  #                          atr_stop_multiplier*ATR from entry; then use the ATR stop.
+  #   atr_only             - always atr_stop_multiplier*ATR.
+  stop_policy: structure_within_atr
+  stop_buffer_atr: 0.1              # stop sits this many ATRs beyond the swing level
+  # target_policy:
+  #   structural_cap - targets start at tp*_r_multiple but are pulled in to the nearest
+  #                    opposing level (PDH/PDL, premarket H/L, ORB H/L). If that leaves TP1 < min_reward_risk -> VETO.
+  #   fixed_r        - pure R multiples (makes the R:R gate a formality; not recommended).
+  target_policy: structural_cap
   tp1_r_multiple: 2.0
   tp2_r_multiple: 3.0
   tp1_scale_out_pct: 0.5            # sell 50% at TP1 and move stop to breakeven
-  max_daily_loss_pct: 0.03          # halt new entries for the day at -3% realized+unrealized
+  max_daily_loss_pct: 0.03          # halt new entries for the day at -3% of start-of-day equity
+  daily_loss_includes_unrealized: true  # open losers count toward the limit, not just closed ones
   consecutive_loss_limit: 3
   consecutive_loss_cooldown_minutes: 30
   max_open_positions: 3
   max_spread_pct: 0.0015            # 0.15%
+  unknown_spread_policy: veto       # veto | allow - what to do when the provider has no real bid/ask (yfinance)
   max_data_age_seconds: 120         # stale-data veto (enforced in paper mode)
   enforce_pdt_rule: false
   pdt_equity_threshold: 25000.0
@@ -60,6 +80,7 @@ providers:
   openai_model: gpt-4o-mini
   llm_timeout_seconds: 20
   max_daily_llm_calls: 200
+  alpaca_feed: iex                  # iex (free) | sip (paid, consolidated NBBO)
   rss_feeds:
     - https://feeds.content.dowjones.io/public/rss/mw_topstories
   mock_seed: 42
@@ -76,7 +97,16 @@ voice:
   max_queue: 10
 
 storage:
-  db_path: data/trades.db
+  # {mode} is replaced by demo/paper/replay/smoke so demo trades can never pollute
+  # paper-mode circuit breakers (daily loss, loss streak, PDT count).
+  db_path: data/trades_{mode}.db
+
+replay:
+  # Free sources do not serve old 1m bars (yfinance keeps ~30 days). Drop CSVs here as
+  # <data_dir>/<YYYY-MM-DD>/<TICKER>.csv (timestamp,open,high,low,close,volume; UTC) to replay any date.
+  source: auto                      # auto (csv -> alpaca -> yfinance -> fail) | csv | alpaca | yfinance
+  data_dir: data/history
+  starting_equity: 100000.0
 
 notifications:
   discord_enabled: false

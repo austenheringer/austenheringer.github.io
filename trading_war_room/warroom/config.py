@@ -47,6 +47,23 @@ class AppSection(_Section):
         return out
 
 
+class DemoSection(_Section):
+    start_time_et: str = "09:50"
+    speed_multiplier: float = Field(default=10.0, gt=0, le=600)
+    scan_interval_seconds: float = Field(default=60, ge=1, le=3600)
+
+    @field_validator("start_time_et")
+    @classmethod
+    def _hhmm(cls, v: str) -> str:
+        try:
+            hh, mm = map(int, v.split(":"))
+        except ValueError:
+            raise ValueError("start_time_et must be HH:MM") from None
+        if not (9 * 60 + 30 <= hh * 60 + mm < 16 * 60):
+            raise ValueError("start_time_et must be within regular hours (09:30-15:59)")
+        return f"{hh:02d}:{mm:02d}"
+
+
 class AccountSection(_Section):
     starting_equity: float = Field(default=100_000.0, gt=0)
     starting_cash: float = Field(default=100_000.0, gt=0)
@@ -63,14 +80,19 @@ class RiskSection(_Section):
     max_position_pct: float = Field(default=0.25, gt=0, le=1.0)
     min_reward_risk: float = Field(default=2.0, ge=1.0, le=20)
     atr_stop_multiplier: float = Field(default=1.5, gt=0, le=10)
+    stop_policy: Literal["structure_within_atr", "atr_only"] = "structure_within_atr"
+    stop_buffer_atr: float = Field(default=0.1, ge=0, le=2)
+    target_policy: Literal["structural_cap", "fixed_r"] = "structural_cap"
     tp1_r_multiple: float = Field(default=2.0, gt=0)
     tp2_r_multiple: float = Field(default=3.0, gt=0)
     tp1_scale_out_pct: float = Field(default=0.5, gt=0, lt=1)
     max_daily_loss_pct: float = Field(default=0.03, gt=0, le=0.2)
+    daily_loss_includes_unrealized: bool = True
     consecutive_loss_limit: int = Field(default=3, ge=1, le=20)
     consecutive_loss_cooldown_minutes: int = Field(default=30, ge=0, le=24 * 60)
     max_open_positions: int = Field(default=3, ge=1, le=50)
     max_spread_pct: float = Field(default=0.0015, gt=0, le=0.05)
+    unknown_spread_policy: Literal["veto", "allow"] = "veto"
     max_data_age_seconds: int = Field(default=120, ge=5, le=3600)
     enforce_pdt_rule: bool = False
     pdt_equity_threshold: float = Field(default=25_000.0, ge=0)
@@ -80,6 +102,8 @@ class RiskSection(_Section):
     def _targets(self) -> "RiskSection":
         if self.tp2_r_multiple <= self.tp1_r_multiple:
             raise ValueError("tp2_r_multiple must be greater than tp1_r_multiple")
+        if self.tp1_r_multiple < self.min_reward_risk:
+            raise ValueError("tp1_r_multiple is below min_reward_risk: every trade would be vetoed")
         if self.max_risk_pct >= self.max_daily_loss_pct:
             raise ValueError("max_risk_pct must be smaller than max_daily_loss_pct (one trade could halt the day)")
         return self
@@ -127,6 +151,7 @@ class ProvidersSection(_Section):
     max_daily_llm_calls: int = Field(default=200, ge=0)
     rss_feeds: list[str] = Field(default_factory=list)
     mock_seed: int = 42
+    alpaca_feed: Literal["iex", "sip"] = "iex"
 
     @field_validator("rss_feeds")
     @classmethod
@@ -151,7 +176,17 @@ class VoiceSection(_Section):
 
 
 class StorageSection(_Section):
-    db_path: str = "data/trades.db"
+    db_path: str = "data/trades_{mode}.db"
+
+    def resolve_db_path(self, mode: Mode) -> str:
+        """Per-mode database so demo/smoke trades never feed paper-mode circuit breakers."""
+        return self.db_path.replace("{mode}", mode.value.lower())
+
+
+class ReplaySection(_Section):
+    source: Literal["auto", "csv", "alpaca", "yfinance"] = "auto"
+    data_dir: str = "data/history"
+    starting_equity: float = Field(default=100_000.0, gt=0)
 
 
 class NotificationsSection(_Section):
@@ -169,6 +204,7 @@ class CalendarSection(_Section):
 
 class AppConfig(_Section):
     app: AppSection = Field(default_factory=AppSection)
+    demo: DemoSection = Field(default_factory=DemoSection)
     account: AccountSection = Field(default_factory=AccountSection)
     risk: RiskSection = Field(default_factory=RiskSection)
     technical: TechnicalSection = Field(default_factory=TechnicalSection)
@@ -178,6 +214,7 @@ class AppConfig(_Section):
     http: HttpSection = Field(default_factory=HttpSection)
     voice: VoiceSection = Field(default_factory=VoiceSection)
     storage: StorageSection = Field(default_factory=StorageSection)
+    replay: ReplaySection = Field(default_factory=ReplaySection)
     notifications: NotificationsSection = Field(default_factory=NotificationsSection)
     calendar: CalendarSection = Field(default_factory=CalendarSection)
 
@@ -272,7 +309,13 @@ def validate_for_mode(config: AppConfig, secrets: Secrets, mode: Mode) -> list[s
         if p.news == "mock":
             warnings.append("--paper is using MOCK news: blackout windows will not reflect real events")
         if p.market_data == "yfinance":
-            warnings.append("yfinance data is delayed/unofficial; expect stale-data vetoes and no real bid/ask")
+            warnings.append(
+                "yfinance data is delayed/unofficial with no real bid/ask: expect stale-data vetoes"
+                + (" and spread vetoes on every setup (risk.unknown_spread_policy=veto)"
+                   if config.risk.unknown_spread_policy == "veto" else "")
+            )
+        if "{mode}" not in config.storage.db_path:
+            warnings.append("storage.db_path has no {mode} placeholder: demo and paper share one database")
         if p.news == "rss" and not p.rss_feeds:
             errors.append("providers.news is rss but providers.rss_feeds is empty")
     if not secrets.alpaca_paper:

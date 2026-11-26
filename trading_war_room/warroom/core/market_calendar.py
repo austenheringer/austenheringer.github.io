@@ -230,3 +230,11 @@ class MarketCalendar:
             if guard > n * 4 + 15:  # pragma: no cover
                 break
         return out
+
+    def latest_session_on_or_before(self, d: date) -> TradingSession:
+        for _ in range(15):
+            sess = self.session(d)
+            if sess is not None:
+                return sess
+            d -= timedelta(days=1)
+        raise RuntimeError("no trading session in the previous 15 days")  # pragma: no cover

@@ -28,10 +28,16 @@ config.yaml                  non-secret settings (validated by warroom.config.Ap
 warroom/
   config.py                  AppConfig / Secrets / load_config / validate_for_mode
   models/schemas.py          ALL domain models + event types + validate_levels()
-  core/clock.py              Clock, SystemClock, SimulatedClock, ET, ensure_utc, to_et
+  core/clock.py              Clock, SystemClock (--paper), DemoClock (--demo), SimulatedClock (--replay/tests)
   core/event_bus.py          typed non-blocking async pub/sub
   core/market_calendar.py    NYSE holidays, early closes, sessions (ORB end, EOD flat)
-  providers/                 base.py interfaces; market_data, news_data, llm_provider, http retry
+  providers/base.py          MarketDataProvider / NewsProvider / LLMProvider + bar helpers
+  providers/http.py          RetryingHttpClient (429/5xx backoff + full jitter, Retry-After)
+  providers/market_data.py   Mock (deterministic scenarios), yfinance, Alpaca REST
+  providers/news_data.py     Mock, RSS, Alpaca, Finnhub, CalendarOnly + StaticMacroCalendar (FOMC dates)
+  providers/sentiment.py     lexicon headline scorer
+  providers/llm_provider.py  DialogueEngine (rewrite-only, number guard, daily cap) + Anthropic/OpenAI/RuleBased
+  providers/factory.py       builds providers per mode (DEMO/SMOKE force mocks; PAPER never silently falls back)
   storage/database.py        SQLite (WAL, serialized writes) + startup state recovery
   agents/                    technical_agent, news_agent, risk_agent, jarvis_interface
   war_room.py                3-round debate engine (per-ticker asyncio.Lock)
@@ -61,6 +67,24 @@ tests/
 7. **Config is strict** (`extra="forbid"`). Add new keys to both `config.yaml` and the
    matching section model in `warroom/config.py`.
 8. Secrets only in `.env`; never log `Secrets` values. `ALPACA_PAPER` must stay true.
+9. **No look-ahead.** Providers return only completed bars (`open + timeframe <= now`) and only
+   news with `published_at <= now`. Mock data is deterministic per (seed, ticker, date).
+10. **LLMs are cosmetic.** Agents compose a deterministic draft; `DialogueEngine.render` may only
+    rephrase it and rejects any rewrite that changes/adds a number. Never let LLM output feed
+    risk math or verdicts.
+11. **One database per mode** (`data/trades_{mode}.db`) so demo trades never touch paper-mode
+    circuit breakers. Recovery is derived from the fills/positions ledger; restored flags are
+    OR-ed in (a restart can only make the system more cautious).
+12. Bars travel as pandas DataFrames (UTC index of bar open times, columns open/high/low/close/volume),
+    normalised by `providers.base.normalize_bars`.
+
+## Risk policy decisions (config `risk.*`)
+
+- Stop: swing level ± `stop_buffer_atr`·ATR unless farther than `atr_stop_multiplier`·ATR → ATR stop.
+- Targets: R multiples pulled in to the nearest opposing structure (PDH/PDL, premarket H/L, ORB H/L);
+  R:R is measured entry→TP1 after capping, so the 2.0 gate actually bites.
+- Daily loss limit counts realized + unrealized P&L against start-of-day equity.
+- No real bid/ask (yfinance) → `unknown_spread_policy` (default veto).
 
 ## Conventions
 
