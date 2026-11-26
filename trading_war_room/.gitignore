@@ -1,0 +1,26 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# runtime data
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.log
+*.mp3
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/

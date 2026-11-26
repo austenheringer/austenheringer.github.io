@@ -1,0 +1,88 @@
+# Trading War Room configuration. Validated on startup by warroom.config.AppConfig;
+# unknown keys and out-of-range values fail fast. Secrets belong in .env, not here.
+
+app:
+  user_title: "Sir"                 # how J.A.R.V.I.S. addresses you
+  tickers: [AAPL, NVDA, TSLA, AMD, MSFT]
+  macro_tickers: [SPY, QQQ]         # regime / trend bias
+  scan_interval_seconds: 15         # orchestrator cycle cadence in demo/paper
+  log_level: INFO
+
+account:
+  starting_equity: 100000.0
+  starting_cash: 100000.0
+
+risk:
+  max_risk_pct: 0.01                # 1.0% of equity risked per trade
+  max_position_pct: 0.25            # max 25% of available cash in one position
+  min_reward_risk: 2.0              # measured entry -> TP1 (conservative: first target must pay 2R)
+  atr_stop_multiplier: 1.5
+  tp1_r_multiple: 2.0
+  tp2_r_multiple: 3.0
+  tp1_scale_out_pct: 0.5            # sell 50% at TP1 and move stop to breakeven
+  max_daily_loss_pct: 0.03          # halt new entries for the day at -3% realized+unrealized
+  consecutive_loss_limit: 3
+  consecutive_loss_cooldown_minutes: 30
+  max_open_positions: 3
+  max_spread_pct: 0.0015            # 0.15%
+  max_data_age_seconds: 120         # stale-data veto (enforced in paper mode)
+  enforce_pdt_rule: false
+  pdt_equity_threshold: 25000.0
+  pdt_max_day_trades: 3             # in a rolling 5-business-day window
+
+technical:
+  setup_cooldown_minutes: 15        # per (ticker, direction) de-dup gate
+  ema_periods: [9, 21, 50]
+  rsi_period: 14
+  atr_period: 14
+  rvol_lookback_days: 10
+  rvol_threshold: 1.5
+  orb_minutes: 15
+  swing_lookback_bars: 10
+
+news:
+  blackout_minutes_before: 15
+  blackout_minutes_after: 15
+  conflict_sentiment_threshold: 0.3 # |sentiment| beyond this against direction = conflict
+
+execution:
+  slippage_pct: 0.0005              # 0.05%
+  commission_per_share: 0.0
+  commission_min: 0.0
+  short_margin_requirement: 1.5     # Reg-T style: reserve 150% of short notional
+  eod_flat_minutes_before_close: 5  # 15:55 ET normal day, 12:55 ET early close
+
+providers:
+  market_data: mock                 # mock | yfinance | alpaca
+  news: mock                        # mock | rss | alpaca | finnhub
+  llm: rule_based                   # rule_based | anthropic | openai
+  anthropic_model: claude-sonnet-5-5
+  openai_model: gpt-4o-mini
+  llm_timeout_seconds: 20
+  max_daily_llm_calls: 200
+  rss_feeds:
+    - https://feeds.content.dowjones.io/public/rss/mw_topstories
+  mock_seed: 42
+
+http:
+  timeout_seconds: 10
+  max_retries: 4
+  backoff_base_seconds: 0.5
+  backoff_max_seconds: 30
+
+voice:
+  edge_voice: en-GB-RyanNeural
+  rate: "+0%"
+  max_queue: 10
+
+storage:
+  db_path: data/trades.db
+
+notifications:
+  discord_enabled: false
+  telegram_enabled: false
+  notify_on: [APPROVED, TRADE_EXECUTED, CIRCUIT_BREAKER]
+
+calendar:
+  extra_holidays: []                # ad-hoc closures, e.g. ["2025-01-09"]
+  extra_early_closes: []
