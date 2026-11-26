@@ -260,6 +260,7 @@ class TradeSetup(_Frozen):
     indicators: IndicatorSnapshot
     macro_bias: Direction | None = None
     on_demand: bool = False
+    qualified: bool = True  # False = on-demand "lean" with no valid trigger; can never be APPROVED
 
 
 # --------------------------------------------------------------------------- news

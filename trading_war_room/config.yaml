@@ -23,6 +23,9 @@ risk:
   max_risk_pct: 0.01                # 1.0% of equity risked per trade
   max_position_pct: 0.25            # max 25% of available cash in one position
   min_reward_risk: 2.0              # measured entry -> TP1 AFTER structural capping (see target_policy)
+  # counter-trend (SPY/QQQ against the trade): TP1 must still pay min_reward_risk AND the blended
+  # R:R (tp1_scale_out_pct at TP1, rest at TP2) must reach this - i.e. room all the way to TP2.
+  counter_trend_min_reward_risk: 2.5
   atr_stop_multiplier: 1.5
   # stop_policy:
   #   structure_within_atr - use the swing low/high (+buffer) unless it is farther than
@@ -30,6 +33,7 @@ risk:
   #   atr_only             - always atr_stop_multiplier*ATR.
   stop_policy: structure_within_atr
   stop_buffer_atr: 0.1              # stop sits this many ATRs beyond the swing level
+  min_stop_atr: 0.25                # never tighter than 0.25 ATR (noise would stop it out)
   # target_policy:
   #   structural_cap - targets start at tp*_r_multiple but are pulled in to the nearest
   #                    opposing level (PDH/PDL, premarket H/L, ORB H/L). If that leaves TP1 < min_reward_risk -> VETO.
@@ -58,7 +62,11 @@ technical:
   rvol_lookback_days: 10
   rvol_threshold: 1.5
   orb_minutes: 15
-  swing_lookback_bars: 10
+  swing_lookback_bars: 10           # 5m bars used for the structural swing high/low
+  history_days: 12                  # calendar days of 5m history fetched (EMA50 warm-up, RVOL, prior day)
+  vwap_touch_pct: 0.0015            # "touched VWAP" tolerance (0.15%)
+  min_confidence_to_trade: 0.55     # below this an approved setup goes to WATCHLIST, not execution
+  no_new_entries_after_et: "15:30"
 
 news:
   blackout_minutes_before: 15

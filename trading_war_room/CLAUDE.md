@@ -35,12 +35,18 @@ warroom/
   providers/http.py          RetryingHttpClient (429/5xx backoff + full jitter, Retry-After)
   providers/market_data.py   Mock (deterministic scenarios), yfinance, Alpaca REST
   providers/news_data.py     Mock, RSS, Alpaca, Finnhub, CalendarOnly + StaticMacroCalendar (FOMC dates)
-  providers/sentiment.py     lexicon headline scorer
+  providers/sentiment.py     lexicon headline scorer (negation/contrast; accuracy-floor test)
+  providers/calendar_feeds.py Fed FOMC + BLS schedule updater (cached), Nasdaq halt feed, HaltAwareNewsProvider
+  providers/healthcheck.py   live contract checks (`main.py --check-providers`)
+  analysis/indicators.py     pure vectorised EMA/RSI(Wilder)/ATR/VWAP/ORB/premarket/PDH-PDL/RVOL/swings
   providers/llm_provider.py  DialogueEngine (rewrite-only, number guard, daily cap) + Anthropic/OpenAI/RuleBased
   providers/factory.py       builds providers per mode (DEMO/SMOKE force mocks; PAPER never silently falls back)
   storage/database.py        SQLite (WAL, serialized writes) + startup state recovery
-  agents/                    technical_agent, news_agent, risk_agent, jarvis_interface
-  war_room.py                3-round debate engine (per-ticker asyncio.Lock)
+  agents/technical_agent.py  TickerContext, macro bias, LONG/SHORT setups, cooldown gate, halt inference
+  agents/news_agent.py       blackout_status() (pure), recency-weighted sentiment, conflicts
+  agents/risk_agent.py       compute_stop/compute_targets/position_size (pure) + RiskAgent veto engine
+  agents/jarvis_interface.py command parser, briefings, status/why/transcript, JarvisContext protocol
+  war_room.py                3-round debate; per-ticker lock + global portfolio lock around vote+execution
   orchestrator.py            scan loop wiring agents, war room, broker, bus, storage
   execution/paper_broker.py  simulated fills, SL / TP1 (50% + BE) / TP2 / EOD flat
   backtest/replay_engine.py  SimulatedClock-driven replay through the same pipeline
@@ -85,6 +91,13 @@ tests/
   R:R is measured entry→TP1 after capping, so the 2.0 gate actually bites.
 - Daily loss limit counts realized + unrealized P&L against start-of-day equity.
 - No real bid/ask (yfinance) → `unknown_spread_policy` (default veto).
+- Counter-trend (SPY/QQQ against the trade): TP1 ≥ `min_reward_risk` AND blended R:R ≥
+  `counter_trend_min_reward_risk`.
+- Only pre-existing levels (PDH/PDL, premarket, ORB) cap targets; the recent swing is excluded
+  because after a breakout it is the breakout bar itself.
+- Risk collects every veto reason (no short-circuit) so `why <TICKER>` is complete.
+- Round 3 re-evaluates against the live portfolio under the global portfolio lock and executes
+  inside the same lock: two debates can never both take the last slot.
 
 ## Conventions
 

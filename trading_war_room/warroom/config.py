@@ -79,9 +79,11 @@ class RiskSection(_Section):
     max_risk_pct: float = Field(default=0.01, gt=0, le=0.05)
     max_position_pct: float = Field(default=0.25, gt=0, le=1.0)
     min_reward_risk: float = Field(default=2.0, ge=1.0, le=20)
+    counter_trend_min_reward_risk: float = Field(default=2.5, ge=1.0, le=20)
     atr_stop_multiplier: float = Field(default=1.5, gt=0, le=10)
     stop_policy: Literal["structure_within_atr", "atr_only"] = "structure_within_atr"
     stop_buffer_atr: float = Field(default=0.1, ge=0, le=2)
+    min_stop_atr: float = Field(default=0.25, gt=0, le=5)
     target_policy: Literal["structural_cap", "fixed_r"] = "structural_cap"
     tp1_r_multiple: float = Field(default=2.0, gt=0)
     tp2_r_multiple: float = Field(default=3.0, gt=0)
@@ -102,6 +104,10 @@ class RiskSection(_Section):
     def _targets(self) -> "RiskSection":
         if self.tp2_r_multiple <= self.tp1_r_multiple:
             raise ValueError("tp2_r_multiple must be greater than tp1_r_multiple")
+        if self.counter_trend_min_reward_risk < self.min_reward_risk:
+            raise ValueError("counter_trend_min_reward_risk must be >= min_reward_risk")
+        if self.min_stop_atr >= self.atr_stop_multiplier:
+            raise ValueError("min_stop_atr must be smaller than atr_stop_multiplier")
         if self.tp1_r_multiple < self.min_reward_risk:
             raise ValueError("tp1_r_multiple is below min_reward_risk: every trade would be vetoed")
         if self.max_risk_pct >= self.max_daily_loss_pct:
@@ -118,6 +124,21 @@ class TechnicalSection(_Section):
     rvol_threshold: float = Field(default=1.5, gt=0)
     orb_minutes: int = Field(default=15, ge=1, le=120)
     swing_lookback_bars: int = Field(default=10, ge=2, le=200)
+    history_days: int = Field(default=12, ge=3, le=60)
+    vwap_touch_pct: float = Field(default=0.0015, ge=0, le=0.02)
+    min_confidence_to_trade: float = Field(default=0.55, ge=0, le=1)
+    no_new_entries_after_et: str = "15:30"
+
+    @field_validator("no_new_entries_after_et")
+    @classmethod
+    def _cutoff(cls, v: str) -> str:
+        try:
+            hh, mm = map(int, v.split(":"))
+        except ValueError:
+            raise ValueError("no_new_entries_after_et must be HH:MM") from None
+        if not (10 * 60 <= hh * 60 + mm <= 16 * 60):
+            raise ValueError("no_new_entries_after_et must be between 10:00 and 16:00")
+        return f"{hh:02d}:{mm:02d}"
 
     @field_validator("ema_periods")
     @classmethod
