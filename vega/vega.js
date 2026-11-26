@@ -726,6 +726,23 @@ for (const m of messages) {
 if (!messages.length) greet();
 // Installable app + offline shell.
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
+
+// Chrome/Android: show an Install button instead of hiding it in the browser menu.
+let installPrompt = null;
+const installBtn = $("install");
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  installPrompt = e;
+  installBtn.hidden = false;
+});
+installBtn.addEventListener("click", async () => {
+  if (!installPrompt) return;
+  installPrompt.prompt();
+  await installPrompt.userChoice;
+  installPrompt = null;
+  installBtn.hidden = true;
+});
+window.addEventListener("appinstalled", () => { installBtn.hidden = true; });
 if ("speechSynthesis" in window) speechSynthesis.getVoices(); // warm voice list
 if (settings.wake) startRecognition();
 setState(settings.wake ? "listening" : "idle", settings.wake ? "Say “Vega…”" : undefined);
