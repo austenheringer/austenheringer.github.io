@@ -82,3 +82,12 @@ def test_demo_clock_maps_holiday_to_last_session(cfg, cal):
     assert to_et(dc.now()).date() == date(2026, 11, 25)
     assert to_et(dc.now()).strftime("%H:%M") == "09:50"
     assert isinstance(dc, DemoClock) and dc.speed == cfg.demo.speed_multiplier
+
+
+def test_demo_clock_resumes_after_saved_activity_not_before(cfg, cal):
+    real = datetime(2026, 11, 26, 8, tzinfo=timezone.utc)
+    last = et(10, 42, date(2026, 11, 25))
+    dc = factory.build_demo_clock(cfg, cal, real, resume_after=last)
+    assert dc.now() >= last + timedelta(minutes=1)
+    old = et(11, 0, date(2026, 11, 20))  # activity from another session: ignored
+    assert to_et(factory.build_demo_clock(cfg, cal, real, resume_after=old).now()).strftime("%H:%M") == "09:50"

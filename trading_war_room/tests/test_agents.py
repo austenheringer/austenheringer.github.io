@@ -16,14 +16,13 @@ from warroom.agents.technical_agent import MacroBias, TechnicalAgent
 from warroom.config import parse_config
 from warroom.core.clock import SimulatedClock
 from warroom.core.event_bus import EventBus
-from warroom.core.market_calendar import MarketCalendar
 from warroom.models.schemas import (
     AgentRole, Direction, JarvisBriefing, MacroEvent, MacroEventKind, MarketRegime, Mode, NewsItem, PlanStatus,
     Position, SetupType, Severity, Stance, WarRoomMessage,
 )
 from warroom.providers.llm_provider import DialogueEngine
 from warroom.providers.market_data import MockDataProvider
-from warroom.providers.news_data import CalendarOnlyNewsProvider, MockNewsProvider, StaticMacroCalendar
+from warroom.providers.news_data import CalendarOnlyNewsProvider, StaticMacroCalendar
 from warroom.storage.database import Database
 from warroom.war_room import WarRoom
 

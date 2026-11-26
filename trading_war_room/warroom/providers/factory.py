@@ -47,13 +47,22 @@ def build_calendar(cfg: AppConfig) -> MarketCalendar:
     )
 
 
-def build_demo_clock(cfg: AppConfig, calendar: MarketCalendar, real_now: datetime) -> DemoClock:
-    """Latest trading session on/before today (ET), starting at demo.start_time_et."""
+def build_demo_clock(cfg: AppConfig, calendar: MarketCalendar, real_now: datetime,
+                     resume_after: datetime | None = None) -> DemoClock:
+    """Latest trading session on/before today (ET), starting at demo.start_time_et.
+
+    ``resume_after``: the last persisted demo activity. If it falls inside that same
+    session, the demo resumes one minute later instead of rewinding to the start time,
+    so a restart never puts the clock behind saved positions, fills or cooldowns."""
+    from datetime import timedelta
+
     from warroom.core.clock import to_et
 
     sess = calendar.latest_session_on_or_before(to_et(real_now).date())
     hh, mm = map(int, cfg.demo.start_time_et.split(":"))
     start = max(sess.open, min(et_to_utc(datetime.combine(sess.day, time(hh, mm))), sess.eod_flat))
+    if resume_after is not None and sess.open <= resume_after < sess.close:
+        start = max(start, resume_after + timedelta(minutes=1))
     return DemoClock(start, cfg.demo.speed_multiplier)
 
 

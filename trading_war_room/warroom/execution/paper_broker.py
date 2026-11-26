@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 
 from warroom.config import ExecutionSection, RiskSection
 from warroom.core.clock import Clock, to_et

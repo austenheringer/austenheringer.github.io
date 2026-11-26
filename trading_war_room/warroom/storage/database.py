@@ -369,6 +369,13 @@ class Database:
             (ts(start),)).fetchone())
         return float(row["equity"]) if row else None
 
+    async def latest_activity(self) -> datetime | None:
+        """Most recent persisted timestamp (equity snapshot or fill)."""
+        row = await self._run(lambda c: c.execute(
+            "SELECT MAX(t) AS t FROM (SELECT MAX(timestamp) AS t FROM equity_snapshots "
+            "UNION ALL SELECT MAX(timestamp) FROM fills)").fetchone())
+        return datetime.fromisoformat(row["t"]) if row and row["t"] else None
+
     async def latest_transcript(self, ticker: str | None = None) -> WarRoomTranscript | None:
         def _q(c: sqlite3.Connection) -> Any:
             if ticker:

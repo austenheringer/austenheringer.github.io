@@ -32,7 +32,6 @@ from warroom.models.schemas import (
     JarvisBriefing,
     MarketRegime,
     MarketUpdate,
-    PlanStatus,
     Stance,
     SystemAlert,
     TradeExecuted,

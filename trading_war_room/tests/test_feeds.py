@@ -3,7 +3,6 @@
 Fixtures mirror the real documents' structure (Fed calendar panel markup,
 BLS iCalendar with folded lines and TZID, Nasdaq ndaq: namespaced RSS)."""
 
-import json
 from datetime import date, timedelta
 
 import httpx

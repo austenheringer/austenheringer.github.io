@@ -2,7 +2,6 @@
 
 import json
 from collections import Counter
-from datetime import date
 
 import httpx
 import pandas as pd
@@ -12,7 +11,6 @@ from tests.conftest import D, et
 from warroom.backtest.metrics import ReplayReport, max_drawdown, profit_factor
 from warroom.config import HttpSection, Secrets, parse_config
 from warroom.core.clock import SimulatedClock
-from warroom.core.event_bus import EventBus
 from warroom.models.schemas import (
     AlertLevel, Fill, JarvisBriefing, Position, SystemAlert, Timeframe, TradeExecuted,
 )

@@ -4,7 +4,7 @@ import httpx
 import pandas as pd
 import pytest
 
-from tests.conftest import D, et
+from tests.conftest import et
 from warroom.config import HttpSection
 from warroom.core.clock import SimulatedClock, et_to_utc, to_et
 from warroom.models.schemas import MacroEventKind, Severity, Timeframe

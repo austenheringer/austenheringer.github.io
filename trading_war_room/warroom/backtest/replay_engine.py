@@ -19,13 +19,13 @@ The database is in-memory: a replay can never touch live/paper state.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
 from warroom.backtest.metrics import ReplayReport
 from warroom.config import AppConfig, ConfigError, Secrets, parse_config
-from warroom.core.clock import Clock, SimulatedClock, et_to_utc, to_et
+from warroom.core.clock import Clock, SimulatedClock
 from warroom.models.schemas import Mode, PlanStatus, Quote, Timeframe
 from warroom.orchestrator import Orchestrator
 from warroom.providers import factory
@@ -109,7 +109,7 @@ def resolve_source(cfg: AppConfig, secrets: Secrets, day: date, clock: Clock) ->
         return SyntheticQuoteAdapter(inner, clock, cfg.replay.assumed_spread_pct), "alpaca"
 
     def yfin():
-        if (date.today() - day).days > 29:
+        if (date.today() - day).days > 29:  # real-world vendor limit, deliberately wall-clock (not trading logic)
             raise ReplayDataUnavailable(f"yfinance only serves 1m bars for ~29 days; {day} is too old")
         try:
             inner = YFinanceDataProvider(clock)

@@ -5,7 +5,6 @@ from datetime import timedelta
 import pytest
 
 from tests.conftest import D, et
-from warroom.core.clock import SimulatedClock
 from warroom.models.schemas import (
     AccountSnapshot, AgentMessage, AgentRole, Fill, Position, RiskState, TradePlan, WarRoomTranscript,
 )
@@ -112,3 +111,12 @@ async def test_concurrent_writes_serialize(db):
 async def test_llm_usage_persisted(db):
     await db.set_llm_usage(D, 7)
     assert await db.get_llm_usage(D) == 7
+
+
+async def test_latest_activity(db):
+    assert await db.latest_activity() is None
+    await db.save_equity_snapshot(AccountSnapshot(timestamp=et(10, 5), equity=1, cash=1, reserved_margin=0,
+                                                  realized_pnl_today=0, unrealized_pnl=0, open_positions=0))
+    await db.record_fill(Fill(position_id="p", ticker="A", direction="LONG", is_entry=True, qty=1, price=1, commission=0,
+                              timestamp=et(10, 9)), mkpos("p", et(10, 9), None, 0, status="OPEN"), 1.0, 0.0)
+    assert await db.latest_activity() == et(10, 9)

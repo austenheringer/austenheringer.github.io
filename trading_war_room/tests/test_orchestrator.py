@@ -1,14 +1,14 @@
 """Orchestrator wiring, commands, recovery, standby, replay, TUI and CLI."""
 
 import asyncio
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 
 from tests.conftest import D, et
 from warroom.config import Secrets, parse_config
 from warroom.core.clock import SimulatedClock, et_to_utc
-from warroom.models.schemas import JarvisBriefing, MarketUpdate, Mode, PlanStatus, WarRoomMessage
+from warroom.models.schemas import JarvisBriefing, MarketUpdate, Mode, WarRoomMessage
 from warroom.orchestrator import Orchestrator
 
 SECRETS = Secrets.from_env({})

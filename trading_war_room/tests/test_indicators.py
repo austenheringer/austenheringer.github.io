@@ -1,6 +1,6 @@
 """Indicator math vs. independent straightforward reference implementations."""
 
-from datetime import date, datetime, timedelta
+from datetime import timedelta
 
 import numpy as np
 import pandas as pd
@@ -8,7 +8,6 @@ import pytest
 
 from tests.conftest import D, et
 from warroom.analysis import indicators as ind
-from warroom.core.clock import et_to_utc
 
 
 def _frame(closes, highs=None, lows=None, vols=None, start=None):

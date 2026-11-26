@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from warroom.agents.jarvis_interface import JarvisInterface, PositionLine, StatusReport
 from warroom.agents.news_agent import NewsAgent
 from warroom.agents.risk_agent import PortfolioView, RiskAgent
-from warroom.agents.technical_agent import MacroBias, TechnicalAgent, TickerContext
+from warroom.agents.technical_agent import TechnicalAgent, TickerContext
 from warroom.config import AppConfig, Secrets
 from warroom.core.clock import Clock, SystemClock, to_et
 from warroom.core.event_bus import EventBus
@@ -108,11 +108,15 @@ class Orchestrator:
                     db_path: str | None = None, voice: bool = False, market: MarketDataProvider | None = None,
                     news_provider: NewsProvider | None = None) -> "Orchestrator":
         calendar = factory.build_calendar(cfg)
-        if clock is None:
-            clock = factory.build_demo_clock(cfg, calendar, SystemClock().now()) if mode is Mode.DEMO else SystemClock()
-        bus = EventBus()
         db = Database(db_path or cfg.storage.resolve_db_path(mode))
         await db.open()
+        if clock is None:
+            if mode is Mode.DEMO:
+                clock = factory.build_demo_clock(cfg, calendar, SystemClock().now(),
+                                                 resume_after=await db.latest_activity())
+            else:
+                clock = SystemClock()
+        bus = EventBus()
         notes: list[str] = []
         market = market or factory.build_market_data(cfg, secrets, clock, calendar, mode)
         if news_provider is None:

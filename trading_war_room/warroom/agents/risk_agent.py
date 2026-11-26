@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 
 from warroom.config import AppConfig
-from warroom.core.clock import Clock, ensure_utc, et_to_utc, to_et
+from warroom.core.clock import Clock, et_to_utc, to_et
 from warroom.core.market_calendar import MarketCalendar
 from warroom.models.schemas import (
     Direction,
