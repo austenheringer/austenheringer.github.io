@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 
 from warroom.agents.jarvis_interface import SETUP_NAMES, JarvisInterface
@@ -86,6 +86,7 @@ class WarRoom:
         self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.last_transcript: WarRoomTranscript | None = None
         self.transcripts: dict[str, WarRoomTranscript] = {}
+        self.history: deque[WarRoomTranscript] = deque(maxlen=1000)
 
     def lock_for(self, ticker: str) -> asyncio.Lock:
         return self._locks[ticker]
@@ -183,6 +184,7 @@ class WarRoom:
         transcript = draft.model_copy(update={"briefing": briefing})
         self.last_transcript = transcript
         self.transcripts[tk] = transcript
+        self.history.append(transcript)
         if self.db is not None:
             try:
                 await self.db.save_transcript(transcript)

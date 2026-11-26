@@ -32,6 +32,7 @@ class AppSection(_Section):
     tickers: list[str] = Field(default_factory=lambda: ["AAPL", "NVDA", "TSLA"], min_length=1, max_length=50)
     macro_tickers: list[str] = Field(default_factory=lambda: ["SPY", "QQQ"], min_length=1)
     scan_interval_seconds: float = Field(default=15, ge=1, le=3600)
+    max_debates_per_cycle: int = Field(default=3, ge=1, le=20)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     @field_validator("tickers", "macro_tickers")

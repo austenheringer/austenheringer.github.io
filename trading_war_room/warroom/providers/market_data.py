@@ -129,6 +129,17 @@ def _scenario_drift(scn: str, vol: float, session_len: int, rng: np.random.Gener
     return drift, vmult
 
 
+@lru_cache(maxsize=4096)
+def _daily_shock(seed: int, ticker: str, ordinal: int) -> float:
+    return float(np.random.default_rng(_seed(seed, "shock", ticker, ordinal)).normal(0, 0.006))
+
+
+def _anchor_drift(seed: int, ticker: str, ordinal: int, window: int = 40) -> float:
+    """Smooth multiplicative drift: a moving sum of daily shocks, so consecutive days share
+    all but one term (day-to-day anchor change ~0.85%), avoiding artificial multi-day gaps."""
+    return float(np.exp(sum(_daily_shock(seed, ticker, ordinal - k) for k in range(window))))
+
+
 @lru_cache(maxsize=512)
 def generate_day(seed: int, ticker: str, day: date, session_len: int) -> pd.DataFrame:
     """Full 04:00-20:00 ET 1m bars for one ticker/day, plus a 'spread' column."""
@@ -138,7 +149,7 @@ def generate_day(seed: int, ticker: str, day: date, session_len: int) -> pd.Data
     scn = scenario_for(seed, ticker, day)
 
     # day-level anchor: deterministic wander around the reference price, plus an overnight gap
-    anchor = ref * float(np.exp(np.random.default_rng(_seed(seed, "anchor", ticker, day.toordinal() // 5)).normal(0, 0.04)))
+    anchor = ref * _anchor_drift(seed, ticker, day.toordinal())
     gap = float(rng.normal(0, 0.006)) + (0.012 if scn == "orb_breakout" else -0.012 if scn == "orb_breakdown" else 0.0)
     p0 = anchor * (1 + gap)
 

@@ -6,6 +6,7 @@ app:
   tickers: [AAPL, NVDA, TSLA, AMD, MSFT]
   macro_tickers: [SPY, QQQ]         # regime / trend bias
   scan_interval_seconds: 15         # orchestrator cycle cadence in --paper (real seconds)
+  max_debates_per_cycle: 3          # cap War Room sessions per cycle (best confidence first)
   log_level: INFO
 
 demo:

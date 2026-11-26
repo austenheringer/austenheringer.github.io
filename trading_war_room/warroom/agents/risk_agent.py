@@ -301,8 +301,10 @@ class RiskAgent:
         # ---- news / catalysts
         if news.in_blackout:
             vetoes.append(f"news blackout: {news.blackout_reason}")
-        if news.conflicts_with_direction and news.severity is Severity.HIGH:
-            vetoes.append(f"high-impact news against the {d.value.lower()} (sentiment {news.sentiment:+.2f})")
+        if news.conflicts_with_direction and (news.severity is Severity.HIGH or abs(news.sentiment) >= 0.6):
+            kind = "high-impact" if news.severity is Severity.HIGH else "strongly"
+            vetoes.append(f"{kind} {'news' if kind == 'high-impact' else 'adverse news'} against the "
+                          f"{d.value.lower()} (sentiment {news.sentiment:+.2f})")
         elif news.conflicts_with_direction:
             warns.append(f"news sentiment {news.sentiment:+.2f} leans against the trade")
         if not setup.qualified:

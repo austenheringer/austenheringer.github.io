@@ -223,10 +223,11 @@ class TechnicalAgent:
 
         # --- Opening range breakout / breakdown (fresh break on the last completed 5m bar)
         if s.orb_high is not None and s.orb_low is not None:
-            if last["close"] > s.orb_high >= prev["close"] and s.price > s.vwap:
+            # no chasing exhausted moves: RSI > 80 into a breakout / < 20 into a breakdown
+            if last["close"] > s.orb_high >= prev["close"] and s.price > s.vwap and s.rsi14 <= 80:
                 add(Direction.LONG, SetupType.ORB_BREAKOUT, 0.5,
                     [f"5m close {last['close']:.2f} broke ORB high {s.orb_high:.2f}", "holding above VWAP"])
-            if last["close"] < s.orb_low <= prev["close"] and s.price < s.vwap:
+            if last["close"] < s.orb_low <= prev["close"] and s.price < s.vwap and s.rsi14 >= 20:
                 add(Direction.SHORT, SetupType.ORB_BREAKDOWN, 0.5,
                     [f"5m close {last['close']:.2f} broke ORB low {s.orb_low:.2f}", "holding below VWAP"])
 
@@ -284,16 +285,22 @@ class TechnicalAgent:
     # ------------------------------------------------------------------ scanning
 
     async def scan(self, tickers: list[str], bias: MacroBias | None = None) -> list[tuple[TradeSetup, TickerContext]]:
-        """Return setups that are NOT on cooldown, best confidence first."""
+        """Build contexts and return setups that are NOT on cooldown, best confidence first."""
         if not self.entry_window_open():
             return []
         bias = bias or await self.macro_bias()
-        contexts = await asyncio.gather(*(self.build_context(t) for t in tickers))
-        fresh_peers = [c for c in contexts if c is not None]
+        contexts = [c for c in await asyncio.gather(*(self.build_context(t) for t in tickers)) if c is not None]
+        return self.scan_contexts(contexts, bias)
+
+    def scan_contexts(self, contexts: list[TickerContext], bias: MacroBias) -> list[tuple[TradeSetup, TickerContext]]:
+        """Setup detection over already-built contexts (the orchestrator builds them once per
+        cycle and reuses them for the watchlist display)."""
+        if not self.entry_window_open():
+            return []
         out: list[tuple[TradeSetup, TickerContext]] = []
         now = self.clock.now()
-        for ctx in fresh_peers:
-            self.flag_possible_halt(ctx, fresh_peers, now)
+        for ctx in contexts:
+            self.flag_possible_halt(ctx, contexts, now)
             for st in self.detect_setups(ctx, bias):
                 if self.on_cooldown(st.ticker, st.direction):
                     log.debug("cooldown: skip %s %s (%.0fs left)", st.ticker, st.direction.value,
