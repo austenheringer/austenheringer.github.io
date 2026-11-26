@@ -724,6 +724,8 @@ for (const m of messages) {
   }
 }
 if (!messages.length) greet();
+// Installable app + offline shell.
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
 if ("speechSynthesis" in window) speechSynthesis.getVoices(); // warm voice list
 if (settings.wake) startRecognition();
 setState(settings.wake ? "listening" : "idle", settings.wake ? "Say “Vega…”" : undefined);
