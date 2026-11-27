@@ -28,6 +28,9 @@ from warroom.agents.news_agent import NewsAgent
 from warroom.agents.risk_agent import PortfolioView, RiskAgent
 from warroom.agents.technical_agent import MacroBias, TechnicalAgent, TickerContext
 from warroom.config import AppConfig, Secrets
+from warroom.control import ControlDesk
+from warroom.settings_manager import DEFAULT_OVERRIDES, SettingsManager
+from warroom.strategies.registry import build_registry
 from warroom.core.assets import AssetClass, AssetRouter, format_price, format_qty
 from warroom.core.clock import Clock, SystemClock, to_et
 from warroom.core.event_bus import EventBus
@@ -68,7 +71,8 @@ class CycleResult:
 class Orchestrator:
     def __init__(self, cfg: AppConfig, secrets: Secrets, mode: Mode, clock: Clock, calendar: MarketCalendar,
                  market: MarketDataProvider, news_provider: NewsProvider, dialogue: DialogueEngine, db: Database,
-                 bus: EventBus, speech: SpeechQueue | None = None, notifications: NotificationHub | None = None) -> None:
+                 bus: EventBus, speech: SpeechQueue | None = None, notifications: NotificationHub | None = None,
+                 overrides_path: str | None = None) -> None:
         self.cfg = cfg
         self.secrets = secrets
         self.mode = mode
@@ -101,6 +105,8 @@ class Orchestrator:
         self._standby_announced = False
         self._halt_announced = False
         self.equities_enabled = True  # crypto-only replays switch the equity desk off
+        self.cfg_pending_restart = False
+        self.control = ControlDesk(self, SettingsManager(overrides_path))
         self._bg: set[asyncio.Task] = set()
         self._closed = False
         self.cycles = 0
@@ -110,7 +116,9 @@ class Orchestrator:
     @classmethod
     async def build(cls, cfg: AppConfig, secrets: Secrets, mode: Mode, *, clock: Clock | None = None,
                     db_path: str | None = None, voice: bool = False, market: MarketDataProvider | None = None,
-                    news_provider: NewsProvider | None = None) -> "Orchestrator":
+                    news_provider: NewsProvider | None = None, overrides_path: str | None = None) -> "Orchestrator":
+        """``overrides_path``: where chat-made setting changes persist. Defaults to
+        data/config_overrides.yaml for --demo/--paper; in-memory for smoke tests and replays."""
         calendar = factory.build_calendar(cfg)
         db = Database(db_path or cfg.storage.resolve_db_path(mode))
         await db.open()
@@ -129,7 +137,10 @@ class Orchestrator:
         dialogue = await factory.build_dialogue(cfg, secrets, clock, mode, db=db)
         speech = SpeechQueue(voice and mode not in (Mode.SMOKE, Mode.REPLAY), cfg.voice)
         notifications = build_notifications(cfg, secrets) if mode in (Mode.PAPER, Mode.DEMO) else NotificationHub([], [])
-        orch = cls(cfg, secrets, mode, clock, calendar, market, news_provider, dialogue, db, bus, speech, notifications)
+        if overrides_path is None and mode in (Mode.DEMO, Mode.PAPER) and db_path != ":memory:":
+            overrides_path = DEFAULT_OVERRIDES
+        orch = cls(cfg, secrets, mode, clock, calendar, market, news_provider, dialogue, db, bus, speech, notifications,
+                   overrides_path=overrides_path)
         orch._startup_notes = notes
         return orch
 
@@ -143,7 +154,8 @@ class Orchestrator:
         await self._refresh_instruments(notes_out := [])
         backend = await self.speech.start()
         self.notifications.start(self.bus)
-        notes = list(getattr(self, "_startup_notes", [])) + rec.notes + notes_out
+        notes = (list(getattr(self, "_startup_notes", [])) + rec.notes + notes_out
+                 + [f"strategy problem: {e}" for e in self.technical.registry.errors])
         for n in notes:
             level = AlertLevel.WARNING if ("WARNING" in n or "coverage" in n or "failed" in n) else AlertLevel.INFO
             self.bus.publish(SystemAlert(timestamp=self.clock.now(), level=level, source="startup", message=n))
@@ -169,6 +181,29 @@ class Orchestrator:
         self.bus.publish(JarvisBriefing(timestamp=self.clock.now(), text=text, kind=kind, speak=speak))
         if speak:
             self.speech.say(text)
+
+    def apply_config(self, new_cfg: AppConfig) -> None:
+        """Hot-apply a validated config to every component (no restart needed for app, risk,
+        technical, news, execution, crypto limits and strategies)."""
+        self.cfg = new_cfg
+        self.technical.cfg, self.technical.t = new_cfg, new_cfg.technical
+        self.news.cfg, self.news.n = new_cfg, new_cfg.news
+        self.risk.cfg, self.risk.r = new_cfg, new_cfg.risk
+        self.broker.ex, self.broker.risk_cfg = new_cfg.execution, new_cfg.risk
+        self.war_room.min_confidence = new_cfg.technical.min_confidence_to_trade
+        self.router.crypto_cfg = new_cfg.crypto
+        if getattr(self.market, "crypto", None) is not None or not new_cfg.crypto.enabled:
+            self.router.crypto_symbols = list(new_cfg.crypto.symbols) if new_cfg.crypto.enabled else []
+        self.jarvis.title = new_cfg.app.user_title
+        self.dialogue.user_title = new_cfg.app.user_title
+        self.dialogue.max_daily_calls = new_cfg.providers.max_daily_llm_calls
+        self.reload_strategies()
+
+    def reload_strategies(self) -> None:
+        self.technical.registry = build_registry(self.cfg)
+        for err in self.technical.registry.errors:
+            self.bus.publish(SystemAlert(timestamp=self.clock.now(), level=AlertLevel.WARNING, source="strategies",
+                                         message=err))
 
     def portfolio_view(self) -> PortfolioView:
         return PortfolioView(equity=self.broker.equity(), available_cash=self.broker.cash,

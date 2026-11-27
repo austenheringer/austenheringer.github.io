@@ -74,7 +74,9 @@ def load(args: argparse.Namespace, mode):
 
     if Path(args.env_file).exists():
         load_dotenv(args.env_file, override=False)
-    cfg = load_config(args.config)
+    from warroom.settings_manager import DEFAULT_OVERRIDES
+
+    cfg = load_config(args.config, overrides=DEFAULT_OVERRIDES)
     secrets = Secrets.from_env()
     warnings = validate_for_mode(cfg, secrets, mode)
     return cfg, secrets, warnings

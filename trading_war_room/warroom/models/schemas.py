@@ -71,6 +71,7 @@ class SetupType(StrEnum):
     RVOL_MOMENTUM = "RVOL_MOMENTUM"
     RANGE_BREAKOUT = "RANGE_BREAKOUT"    # crypto: break of the rolling multi-hour range
     RANGE_BREAKDOWN = "RANGE_BREAKDOWN"
+    CUSTOM = "CUSTOM"                    # user rule strategy (see TradeSetup.strategy)
 
 
 class AgentRole(StrEnum):
@@ -266,6 +267,7 @@ class TradeSetup(_Frozen):
     macro_bias: Direction | None = None
     on_demand: bool = False
     qualified: bool = True  # False = on-demand "lean" with no valid trigger; can never be APPROVED
+    strategy: str = ""      # name of the strategy that produced it
 
 
 # --------------------------------------------------------------------------- news
@@ -383,6 +385,7 @@ class TradePlan(_Frozen):
     reward_risk: float | None = None
     veto_reasons: list[str] = Field(default_factory=list)
     summary: str = ""
+    strategy: str = ""
     created_at: UTCDatetime
 
     @model_validator(mode="after")
@@ -443,6 +446,7 @@ class Position(_Mutable):
     closed_at: UTCDatetime | None = None
     exit_reason: ExitReason | None = None
     last_price: float | None = None
+    strategy: str = ""
 
     def unrealized_pnl(self, price: float | None = None) -> float:
         px = price if price is not None else self.last_price

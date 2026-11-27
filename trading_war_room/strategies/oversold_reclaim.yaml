@@ -1,0 +1,10 @@
+# Example user strategy (OFF by default). Switch it on by telling J.A.R.V.I.S.: "enable oversold_reclaim"
+name: oversold_reclaim
+description: Buy an oversold dip that reclaims VWAP while the bigger trend is still up
+assets: [equity, crypto]
+confidence: 0.45
+long_when:
+  - rsi14 between 25 40
+  - close crosses_above vwap
+  - close > ema50
+  - rvol >= 1.2

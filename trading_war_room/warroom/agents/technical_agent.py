@@ -37,6 +37,8 @@ from warroom.models.schemas import (
     TradeSetup,
 )
 from warroom.providers.base import MarketDataProvider, ProviderError
+from warroom.strategies.base import StrategyContext
+from warroom.strategies.registry import build_registry
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +86,7 @@ class TechnicalAgent:
         self.calendar = calendar
         self.clock = clock
         self.router = router or AssetRouter(calendar, cfg.crypto)
+        self.registry = build_registry(cfg)
         self._last_debated: dict[tuple[str, Direction], datetime] = {}
 
     # ------------------------------------------------------------------ cooldown gate
@@ -264,86 +267,45 @@ class TechnicalAgent:
     # ------------------------------------------------------------------ setups
 
     def detect_setups(self, ctx: TickerContext, bias: MacroBias, on_demand: bool = False) -> list[TradeSetup]:
+        """Run every enabled strategy on the last completed setup bar, then apply the shared
+        confidence adjustments (RVOL, index trend, higher-timeframe trend) and keep the best
+        setup per direction."""
         s = ctx.snapshot
         bars = ctx.bars_5m
         now = self.clock.now()
         if len(bars) < 2 or None in (s.vwap, s.ema9, s.ema21, s.atr14, s.rsi14):
             return []
-        last, prev = bars.iloc[-1], bars.iloc[-2]
-        found: list[TradeSetup] = []
+        sc = StrategyContext(ctx=ctx, cfg=self.cfg, bias=bias, last=bars.iloc[-1], prev=bars.iloc[-2], bars=bars)
         rvol_ok = s.rvol is not None and s.rvol >= self.t.rvol_threshold
-        touch = self.t.vwap_touch_pct
-        rng = max(last["high"] - last["low"], 1e-9)
-        close_pos = (last["close"] - last["low"]) / rng  # 0 = closed at low, 1 = at high
-
-        def add(direction: Direction, setup: SetupType, base: float, why: list[str]) -> None:
-            conf = base
-            if rvol_ok:
-                conf += 0.1
-                why.append(f"RVOL {s.rvol:.1f}x confirms participation")
-            tape = "BTC" if ctx.is_crypto else "SPY/QQQ"
-            if bias.direction is direction:
-                conf += 0.1
-                why.append(f"aligned with {bias.regime.value} tape ({tape})")
-            elif bias.direction is direction.opposite:
-                conf -= 0.15
-                why.append(f"against {bias.regime.value} tape ({tape})")
-            if ctx.trend_15m is direction:
-                conf += 0.05
-                why.append("1h trend agrees" if ctx.is_crypto else "15m trend agrees")
-            found.append(TradeSetup(
-                ticker=ctx.ticker, direction=direction, setup_type=setup, detected_at=now, trigger_price=s.price,
-                confidence=round(min(1.0, max(0.0, conf)), 2), rationale=why, indicators=s,
-                macro_bias=bias.direction, on_demand=on_demand,
-            ))
-
-        # --- Opening range breakout / breakdown (fresh break on the last completed 5m bar)
-        if s.orb_high is not None and s.orb_low is not None:
-            # no chasing exhausted moves: RSI > 80 into a breakout / < 20 into a breakdown
-            if last["close"] > s.orb_high >= prev["close"] and s.price > s.vwap and s.rsi14 <= 80:
-                add(Direction.LONG, SetupType.ORB_BREAKOUT, 0.5,
-                    [f"5m close {last['close']:.2f} broke ORB high {s.orb_high:.2f}", "holding above VWAP"])
-            if last["close"] < s.orb_low <= prev["close"] and s.price < s.vwap and s.rsi14 >= 20:
-                add(Direction.SHORT, SetupType.ORB_BREAKDOWN, 0.5,
-                    [f"5m close {last['close']:.2f} broke ORB low {s.orb_low:.2f}", "holding below VWAP"])
-
-        # --- Crypto rolling-range breakout / breakdown (no opening bell in a 24/7 market)
-        if ctx.is_crypto and s.range_high is not None and s.range_low is not None:
-            hrs = self.cfg.crypto.range_lookback_minutes // 60
-            if last["close"] > s.range_high >= prev["close"] and s.price > s.vwap and s.rsi14 <= 80:
-                add(Direction.LONG, SetupType.RANGE_BREAKOUT, 0.5,
-                    [f"close {last['close']:.2f} broke the {hrs}h range high {s.range_high:.2f}", "above the UTC-day VWAP"])
-            if last["close"] < s.range_low <= prev["close"] and s.price < s.vwap and s.rsi14 >= 20:
-                add(Direction.SHORT, SetupType.RANGE_BREAKDOWN, 0.5,
-                    [f"close {last['close']:.2f} broke the {hrs}h range low {s.range_low:.2f}", "below the UTC-day VWAP"])
-
-        # --- VWAP bounce / rejection
-        if last["low"] <= s.vwap * (1 + touch) and last["close"] > s.vwap and last["close"] > last["open"] and s.ema9 > s.ema21:
-            add(Direction.LONG, SetupType.VWAP_BOUNCE, 0.45,
-                [f"tested VWAP {s.vwap:.2f} and closed back above", "EMA9 above EMA21"])
-        if last["high"] >= s.vwap * (1 - touch) and last["close"] < s.vwap and last["close"] < last["open"] and s.ema9 < s.ema21:
-            add(Direction.SHORT, SetupType.VWAP_REJECTION, 0.45,
-                [f"rejected at VWAP {s.vwap:.2f}", "EMA9 below EMA21"])
-
-        # --- EMA pullback in an aligned trend
-        if s.ema50 is not None:
-            if (s.ema9 > s.ema21 > s.ema50 and last["low"] <= s.ema9 and last["close"] > s.ema9
-                    and 40 <= s.rsi14 <= 65 and s.price > s.vwap):
-                add(Direction.LONG, SetupType.EMA_PULLBACK, 0.45,
-                    [f"pullback to EMA9 {s.ema9:.2f} in a 9>21>50 uptrend", f"RSI {s.rsi14:.0f} reset, not overbought"])
-            if (s.ema9 < s.ema21 < s.ema50 and last["high"] >= s.ema9 and last["close"] < s.ema9
-                    and 35 <= s.rsi14 <= 60 and s.price < s.vwap):
-                add(Direction.SHORT, SetupType.EMA_PULLBACK, 0.45,
-                    [f"rally into EMA9 {s.ema9:.2f} in a 9<21<50 downtrend", f"RSI {s.rsi14:.0f} reset, not oversold"])
-
-        # --- High-RVOL momentum
-        if s.rvol is not None and s.rvol >= self.t.rvol_threshold * 1.3:
-            if s.price > s.vwap and s.ema9 > s.ema21 and 55 <= s.rsi14 <= 75 and last["close"] > last["open"] and close_pos >= 0.7:
-                add(Direction.LONG, SetupType.RVOL_MOMENTUM, 0.4,
-                    [f"RVOL {s.rvol:.1f}x momentum bar closing near highs", f"RSI {s.rsi14:.0f}"])
-            if s.price < s.vwap and s.ema9 < s.ema21 and 25 <= s.rsi14 <= 45 and last["close"] < last["open"] and close_pos <= 0.3:
-                add(Direction.SHORT, SetupType.RVOL_MOMENTUM, 0.4,
-                    [f"RVOL {s.rvol:.1f}x momentum bar closing near lows", f"RSI {s.rsi14:.0f}"])
+        tape = "BTC" if ctx.is_crypto else "SPY/QQQ"
+        found: list[TradeSetup] = []
+        for strat in self.registry.active():
+            if not strat.applies_to(ctx.asset_class):
+                continue
+            try:
+                signals = strat.evaluate(sc)
+            except Exception:  # noqa: BLE001 - one broken strategy must not stop the others
+                log.exception("strategy %s failed on %s", strat.name, ctx.ticker)
+                continue
+            for sig in signals:
+                conf, why = sig.base_confidence, list(sig.rationale)
+                if rvol_ok:
+                    conf += 0.1
+                    why.append(f"RVOL {s.rvol:.1f}x confirms participation")
+                if bias.direction is sig.direction:
+                    conf += 0.1
+                    why.append(f"aligned with {bias.regime.value} tape ({tape})")
+                elif bias.direction is sig.direction.opposite:
+                    conf -= 0.15
+                    why.append(f"against {bias.regime.value} tape ({tape})")
+                if ctx.trend_15m is sig.direction:
+                    conf += 0.05
+                    why.append("1h trend agrees" if ctx.is_crypto else "15m trend agrees")
+                found.append(TradeSetup(
+                    ticker=ctx.ticker, direction=sig.direction, setup_type=sig.setup_type, detected_at=now,
+                    trigger_price=s.price, confidence=round(min(1.0, max(0.0, conf)), 2), rationale=why, indicators=s,
+                    macro_bias=bias.direction, on_demand=on_demand, strategy=sig.strategy,
+                ))
 
         # spot crypto cannot be shorted: don't convene debates that can only end in a veto
         if ctx.instrument is not None and not ctx.instrument.allow_short:

@@ -25,7 +25,7 @@ import logging
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 
-from warroom.agents.jarvis_interface import SETUP_NAMES, JarvisInterface
+from warroom.agents.jarvis_interface import JarvisInterface, setup_label
 from warroom.agents.news_agent import BlackoutResult, NewsAgent
 from warroom.agents.risk_agent import PortfolioView, RiskAgent, RiskNotes
 from warroom.agents.technical_agent import MacroBias, TechnicalAgent, TickerContext
@@ -121,7 +121,7 @@ class WarRoom:
         msgs: list[AgentMessage] = []
         tk, d = setup.ticker, setup.direction
         s = ctx.snapshot
-        name = SETUP_NAMES.get(setup.setup_type.value, setup.setup_type.value)
+        name = setup_label(setup.setup_type, setup.strategy)
 
         news, bo = await self.news.assess(tk, d)
         prelim, notes = self.risk.evaluate(setup, ctx, news, self.portfolio(), bias.direction)
@@ -138,7 +138,7 @@ class WarRoom:
         await self._say(msgs, did, tk, AgentRole.TECHNICAL, 1, pitch_stance,
                         f"{lead} Price {s.price:.2f} vs VWAP {vw}{dist}, RSI {rsi}, RVOL {rvol}, ATR {atr}. "
                         f"{'; '.join(setup.rationale)}. Confidence {setup.confidence:.0%}.",
-                        setup_type=setup.setup_type.value, confidence=setup.confidence, price=s.price,
+                        setup_type=setup.setup_type.value, strategy=setup.strategy, confidence=setup.confidence, price=s.price,
                         vwap=s.vwap, rsi=s.rsi14, rvol=s.rvol, atr=s.atr14, qualified=setup.qualified)
 
         await self._say(msgs, did, tk, AgentRole.NEWS, 1, self._news_stance(news, bo, d), self._news_report(news, bo),
@@ -329,6 +329,7 @@ class WarRoom:
 
     def _synthesise(self, did: str, setup: TradeSetup, a: RiskAssessment, news: NewsAssessment) -> TradePlan:
         base = dict(debate_id=did, ticker=setup.ticker, direction=setup.direction, setup_type=setup.setup_type,
+                    strategy=setup.strategy,
                     entry=a.entry, stop_loss=a.stop_loss, tp1=a.tp1, tp2=a.tp2, reward_risk=a.reward_risk,
                     created_at=self.clock.now())
         if not a.approved:

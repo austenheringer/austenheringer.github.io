@@ -95,7 +95,7 @@ class WarRoomApp(App):
             yield RichLog(id="warroom", wrap=True, markup=False, highlight=False, max_lines=2000)
         with Vertical(id="bottom"):
             yield RichLog(id="jarvis", wrap=True, markup=False, max_lines=1000)
-            yield Input(placeholder="J.A.R.V.I.S. >  status | analyze TSLA | why AAPL | transcript | pause | resume | flatten",
+            yield Input(placeholder="J.A.R.V.I.S. >  status | analyze TSLA | why AAPL | strategies | stats | set risk per trade to 0.5% | new strategy ... | help",
                         id="cmd")
 
     async def on_mount(self) -> None:

@@ -51,6 +51,12 @@ warroom/
   agents/news_agent.py       blackout_status() (pure), recency-weighted sentiment, conflicts
   agents/risk_agent.py       compute_stop/compute_targets/position_size (pure) + RiskAgent veto engine
   agents/jarvis_interface.py command parser, briefings, status/why/transcript, JarvisContext protocol
+  strategies/base.py         Strategy ABC, Signal, StrategyContext, StrategyRegistry
+  strategies/builtin.py      the 5 built-in strategies (orb_breakout, range_breakout, vwap_bounce, ema_pullback, rvol_momentum)
+  strategies/rules.py        declarative rule language for user strategies (whitelisted fields/ops, no eval)
+  strategies/registry.py     build_registry(cfg): built-ins + strategies/*.yaml, enabled list
+  settings_manager.py        aliases, value parsing, validate-by-AppConfig, data/config_overrides.yaml
+  control.py                 ControlDesk: chat commands for strategies/settings, confirm/cancel, LLM translation
   war_room.py                3-round debate; per-ticker lock + global portfolio lock around vote+execution
   orchestrator.py            build()/start()/run_cycle()/run_forever()/shutdown(); implements JarvisContext
   execution/base.py          Broker protocol (PaperBroker is the only implementation)
@@ -99,6 +105,14 @@ tests/
     see docs/LIVE_TRADING_PLAN.md before touching `execution/`.
 16. Invariant test: no replayed trade may lose much more than its risk budget
     (`_assert_losses_bounded`). Keep it green; it caught the stale-bar and overnight-gap bugs.
+
+17. **User strategies are data, not code.** Never add an eval/exec path for strategy rules or LLM output.
+    New fields go in `strategies.rules.FIELDS` (a whitelist). LLM output is validated by `validate_spec`
+    and requires user `confirm` before saving.
+18. **Chat changes go through `SettingsManager.plan`** (full AppConfig validation). Never mutate config
+    objects directly; use `Orchestrator.apply_config`. `execution.live_trading_enabled` is BLOCKED.
+19. Smoke tests, replays and unit tests use an in-memory `SettingsManager(None)`: they must never write
+    `data/config_overrides.yaml`.
 
 ## Risk policy decisions (config `risk.*`)
 

@@ -75,6 +75,12 @@ def numbers_preserved(draft: str, rewrite: str) -> bool:
     return set(d) <= set(r) and set(r) <= set(d)
 
 
+def _b64(data: bytes) -> str:
+    import base64
+
+    return base64.b64encode(data).decode("ascii")
+
+
 class RuleBasedDialogueProvider(LLMProvider):
     """Deterministic fallback. Returns the draft (lightly normalised)."""
 
@@ -113,6 +119,16 @@ class AnthropicProvider(LLMProvider):
         )
         return "".join(getattr(b, "text", "") for b in resp.content).strip()
 
+    async def complete_with_image(self, system: str, prompt: str, image: bytes, media_type: str,
+                                  max_tokens: int = 800) -> str:
+        resp = await self._client.messages.create(
+            model=self.model, max_tokens=max_tokens, system=system,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": _b64(image)}},
+                {"type": "text", "text": prompt}]}],
+        )
+        return "".join(getattr(b, "text", "") for b in resp.content).strip()
+
     async def aclose(self) -> None:
         await self._client.close()
 
@@ -134,6 +150,16 @@ class OpenAIProvider(LLMProvider):
         resp = await self._client.chat.completions.create(
             model=self.model, max_tokens=max_tokens,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+        )
+        return (resp.choices[0].message.content or "").strip()
+
+    async def complete_with_image(self, system: str, prompt: str, image: bytes, media_type: str,
+                                  max_tokens: int = 800) -> str:
+        resp = await self._client.chat.completions.create(
+            model=self.model, max_tokens=max_tokens,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{_b64(image)}"}}]}],
         )
         return (resp.choices[0].message.content or "").strip()
 
@@ -211,6 +237,40 @@ class DialogueEngine:
             log.info("LLM rewrite rejected (numbers changed or malformed); using draft")
             return draft
         return out
+
+    @property
+    def can_ask(self) -> bool:
+        return self.primary is not None and not self.budget_exhausted
+
+    @property
+    def can_see(self) -> bool:
+        return self.can_ask and hasattr(self.primary, "complete_with_image")
+
+    async def ask(self, system: str, prompt: str, max_tokens: int = 800,
+                  image: tuple[bytes, str] | None = None) -> str | None:
+        """Raw LLM answer for translation tasks (commands, strategy rules), counted against the
+        daily budget. Returns None when no LLM is available or the call fails. Callers MUST
+        validate the output - it is never executed or applied directly."""
+        if not self.can_ask or (image is not None and not self.can_see):
+            return None
+        self._calls += 1
+        if self._on_call:
+            try:
+                await self._on_call(self._usage_day, self._calls)
+            except Exception:  # noqa: BLE001
+                log.exception("failed to persist LLM usage")
+        try:
+            if image is not None:
+                coro = self.primary.complete_with_image(system, prompt, image[0], image[1], max_tokens)  # type: ignore[union-attr]
+            else:
+                coro = self.primary.complete(system, prompt, max_tokens)  # type: ignore[union-attr]
+            return await asyncio.wait_for(coro, self.timeout * (3 if image else 1.5))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.failures += 1
+            log.warning("LLM ask failed (%s)", type(exc).__name__)
+            return None
 
     async def aclose(self) -> None:
         if self.primary:

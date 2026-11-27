@@ -22,7 +22,7 @@ pip install -e ".[dev]"                                 # core + pytest (no API 
 
 python main.py --smoke-test        # 3 headless cycles; prints SMOKE TEST PASSED, exit 0
 python main.py --demo              # full TUI on synthetic data, zero keys
-pytest -q                          # 273 tests, no network
+pytest -q                          # 329 tests, no network
 ```
 
 `--demo` replays the most recent trading session (from 09:50 ET, 10x speed) on deterministic
@@ -40,6 +40,42 @@ pip install -e ".[all]"        # everything
 
 None of these are needed for `--demo` or `--smoke-test`; each is imported lazily and the system
 degrades gracefully without it.
+
+---
+
+## Talk to it: strategies and settings
+
+Everything is adjustable from the J.A.R.V.I.S. command bar. No code and no config editing needed.
+
+**Strategies:**
+- `strategies` lists them, on or off;
+- `disable vwap_bounce` / `enable oversold_reclaim` switch them;
+- `show strategy ema_pullback` shows the exact rules;
+- `set strategy rvol_momentum rvol_multiple to 1.6` tunes a built-in;
+- `stats` shows which ones actually make money, net of fees.
+
+**New strategies:**
+- `new strategy dip_buyer: long when rsi14 < 30 and close > ema50` (rule format, no AI needed);
+- `new strategy: fade gaps above yesterday's high when overbought` (plain English, needs an AI key);
+- `new strategy from ~/Desktop/chart.png` (a screenshot of your rules, needs an AI key with vision).
+
+You see the exact rules first, and `confirm` saves and switches the strategy on. Strategies are
+declarative rule files in [`strategies/`](strategies/README.md), never code. The AI only translates
+into that format, and its output is validated like any rule file.
+
+**Settings:**
+- `settings` / `settings risk` show the current values;
+- `set risk per trade to 0.5%`, `set max positions to 2`, `set entry cutoff to 15:00` change them;
+- `add stock AMZN`, `add coin DOGE`, `remove stock TSLA` change the watchlist.
+
+Changes to numbers show before → after and wait for `confirm` (or `cancel`). Every change goes
+through the same validation as `config.yaml`, so chat can't set anything unsafe: risk per trade over
+5%, an inconsistent combination, or real-money trading are all refused. Changes apply instantly, are
+saved to `data/config_overrides.yaml` (your `config.yaml` is never rewritten), survive restarts, and
+are logged. `reset settings` undoes them all.
+
+If you have an AI key, you can also just say what you want ("stop using the volume spike strategy").
+It's translated into one of the commands above, then follows the same confirm rules.
 
 ---
 
@@ -110,6 +146,8 @@ Type into the command bar at the bottom of the TUI (exact commands or natural ph
 | `transcript` / `transcript NVDA` | The full 3-round debate |
 | `pause` / `resume` | Stops / restarts new entries (open positions stay managed) |
 | `flatten` / "close everything" | Closes all paper positions at market |
+| `strategies`, `enable` / `disable NAME`, `stats`, `new strategy ...` | Manage strategies (see above) |
+| `settings`, `set <setting> to <value>`, `add stock` / `add coin`, `confirm` / `cancel` | Change settings by talking |
 | `help` | Command list |
 
 `F2` = status, `F3` = transcript.

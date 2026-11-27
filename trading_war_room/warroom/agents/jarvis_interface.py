@@ -33,6 +33,14 @@ SETUP_NAMES = {
     "RANGE_BREAKOUT": "range breakout", "RANGE_BREAKDOWN": "range breakdown",
 }
 
+def setup_label(setup_type, strategy: str = "") -> str:
+    """Human name for a setup: built-in pattern names, or the user strategy's name."""
+    value = getattr(setup_type, "value", str(setup_type))
+    if value == "CUSTOM" and strategy:
+        return strategy.replace("_", " ") + " setup"
+    return SETUP_NAMES.get(value, value.lower().replace("_", " "))
+
+
 _WIT = [
     "The market, as ever, remains unmoved by our enthusiasm.",
     "I shall keep the champagne on ice, but not open it.",
@@ -51,6 +59,22 @@ class CommandKind(StrEnum):
     RESUME = "resume"
     FLATTEN = "flatten"
     HELP = "help"
+    STRATEGIES = "strategies"
+    SHOW_STRATEGY = "show_strategy"
+    ENABLE = "enable"
+    DISABLE = "disable"
+    NEW_STRATEGY = "new_strategy"
+    DELETE_STRATEGY = "delete_strategy"
+    STRATEGY_PARAM = "strategy_param"
+    FIELDS = "fields"
+    STATS = "stats"
+    SETTINGS = "settings"
+    SET = "set"
+    ADD_SYMBOL = "add_symbol"
+    REMOVE_SYMBOL = "remove_symbol"
+    CONFIRM = "confirm"
+    CANCEL = "cancel"
+    RESET_SETTINGS = "reset_settings"
     UNKNOWN = "unknown"
 
 
@@ -59,6 +83,7 @@ class Command:
     kind: CommandKind
     ticker: str | None = None
     raw: str = ""
+    args: tuple = ()
 
 
 _STOPWORDS = {
@@ -90,6 +115,9 @@ def parse_command(text: str) -> Command:
         return Command(CommandKind.UNKNOWN, raw=raw)
     if t in ("help", "commands", "?") or t.startswith("help"):
         return Command(CommandKind.HELP, raw=raw)
+    control = _parse_control(raw, t)
+    if control is not None:
+        return control
     if re.search(r"\b(status|sitrep|how are we|where do we stand|p&l|pnl)\b", t):
         return Command(CommandKind.STATUS, raw=raw)
     if re.search(r"\b(flatten|close (all|everything)|liquidate|get me flat|go flat)\b", t):
@@ -112,10 +140,69 @@ def parse_command(text: str) -> Command:
     return Command(CommandKind.UNKNOWN, raw=raw)
 
 
+_SYMBOL_KIND = r"(stock|stocks|ticker|tickers|share|shares|coin|coins|crypto|cryptos|token|tokens)"
+
+
+def _parse_control(raw: str, t: str) -> Command | None:
+    """Strategy and settings management commands."""
+    def cmd(kind: CommandKind, *args) -> Command:
+        return Command(kind, raw=raw, args=tuple(a.strip() if isinstance(a, str) else a for a in args))
+
+    if t in ("confirm", "yes", "yes please", "do it", "apply", "apply it", "confirmed", "go ahead"):
+        return cmd(CommandKind.CONFIRM)
+    if t in ("cancel", "no", "never mind", "nevermind", "discard", "abort", "don't"):
+        return cmd(CommandKind.CANCEL)
+    m = re.match(r"(?i)^\s*(?:new|create|add|make)\s+(?:a\s+)?strategy\b\s*:?\s*(.*)$", raw, re.S)
+    if m:
+        return cmd(CommandKind.NEW_STRATEGY, m.group(1))
+    m = re.match(r"^(?:delete|remove)\s+strategy\s+(.+)$", t)
+    if m:
+        return cmd(CommandKind.DELETE_STRATEGY, m.group(1))
+    if re.match(r"^(?:strategy fields|rule fields|fields|what fields.*)$", t):
+        return cmd(CommandKind.FIELDS)
+    m = re.match(r"^(?:set|change)\s+strategy\s+(\S+)\s+(\S+)\s+(?:to\s+|=\s*)?(\S+)$", t)
+    if m:
+        return cmd(CommandKind.STRATEGY_PARAM, m.group(1), m.group(2), m.group(3))
+    m = re.match(r"^(?:show|describe|explain)\s+(?:the\s+)?strategy\s+(.+)$", t)
+    if m:
+        return cmd(CommandKind.SHOW_STRATEGY, m.group(1))
+    if re.match(r"^(?:strategies|list strategies|show strategies|my strategies|what strategies.*|which strategies are (on|active).*)$", t):
+        return cmd(CommandKind.STRATEGIES)
+    if re.match(r"^(?:stats|statistics|performance|results|strategy stats|which strategies (work|are working|make money).*|how are (my )?strategies doing.*)$", t):
+        return cmd(CommandKind.STATS)
+    m = re.match(r"^(?:enable|turn on|switch on|activate)\s+(?:the\s+)?(.+?)(?:\s+strategy)?$", t)
+    if m:
+        return cmd(CommandKind.ENABLE, m.group(1))
+    m = re.match(r"^(?:disable|turn off|switch off|deactivate)\s+(?:the\s+)?(.+?)(?:\s+strategy)?$", t)
+    if m:
+        return cmd(CommandKind.DISABLE, m.group(1))
+    if re.match(r"^reset (?:all )?(?:settings|config|configuration)$", t):
+        return cmd(CommandKind.RESET_SETTINGS)
+    m = re.match(r"^(?:settings|show settings|config|show config|configuration)(?:\s+(?:for\s+)?(\w+))?$", t)
+    if m:
+        return cmd(CommandKind.SETTINGS, m.group(1) or "")
+    m = re.match(rf"^(?:add|watch|track)\s+{_SYMBOL_KIND}\s+(.+)$", t)
+    if m:
+        kind = "coin" if m.group(1).startswith(("coin", "crypto", "token")) else "stock"
+        return cmd(CommandKind.ADD_SYMBOL, kind, m.group(2))
+    m = re.match(rf"^(?:remove|drop|unwatch|stop watching)\s+{_SYMBOL_KIND}\s+(.+)$", t)
+    if m:
+        kind = "coin" if m.group(1).startswith(("coin", "crypto", "token")) else "stock"
+        return cmd(CommandKind.REMOVE_SYMBOL, kind, m.group(2))
+    # match the ORIGINAL text so values keep their case ("set title to Boss")
+    m = re.match(r"(?i)^\s*(?:set|change|make|update|put)\s+(?:my\s+|the\s+)?(.+?)\s+(?:to|=|at)\s+(.+?)[\s.!?]*$", raw)
+    if m:
+        return cmd(CommandKind.SET, m.group(1).lower(), m.group(2))
+    return None
+
+
 HELP_TEXT = (
-    "Commands: 'status' (equity, P&L, positions, regime, breakers); 'analyze TSLA' (convene the War Room now); "
-    "'why AAPL' (explain the last verdict); 'transcript [TICKER]' (full last debate); 'pause' / 'resume' "
-    "(new entries); 'flatten' (close all paper positions at market)."
+    "Commands: 'status'; 'analyze TSLA'; 'why AAPL'; 'transcript [TICKER]'; 'pause' / 'resume'; 'flatten'. "
+    "Strategies: 'strategies', 'show strategy NAME', 'enable NAME', 'disable NAME', 'stats', 'strategy fields', "
+    "'new strategy NAME: long when rsi14 < 30 and close > ema50', 'new strategy from ~/chart.png', "
+    "'set strategy NAME PARAM to VALUE', 'delete strategy NAME'. Settings: 'settings [risk]', "
+    "'set risk per trade to 0.5%', 'add stock AMZN', 'add coin DOGE', 'remove stock TSLA', 'reset settings'. "
+    "Changes to numbers and new strategies wait for 'confirm' (or 'cancel')."
 )
 
 
@@ -178,7 +265,7 @@ class JarvisInterface:
 
     def briefing_draft(self, t: WarRoomTranscript) -> str:
         p = t.plan
-        setup = SETUP_NAMES.get(p.setup_type.value, p.setup_type.value.lower())
+        setup = setup_label(p.setup_type, p.strategy)
         side = p.direction.value.lower()
         disagreements = [m for m in t.messages if m.round_number == 2 and m.stance in (Stance.CHALLENGE, Stance.CAUTION)]
         dispute = ""
@@ -242,7 +329,55 @@ class JarvisInterface:
 
     async def handle(self, text: str, ctx: JarvisContext) -> str:
         cmd = parse_command(text)
+        prefix = ""
+        control = getattr(ctx, "control", None)
+        if cmd.kind is CommandKind.UNKNOWN and control is not None and text.strip():
+            translated = await control.translate(text)
+            if translated:
+                cmd2 = parse_command(translated)
+                if cmd2.kind is not CommandKind.UNKNOWN:
+                    cmd, prefix = cmd2, f"(Taking that as: {translated}) "
+        reply = await self._dispatch(cmd, ctx, control)
+        return prefix + reply
+
+    async def _dispatch(self, cmd: Command, ctx: JarvisContext, control) -> str:
         k = cmd.kind
+        if control is not None:
+            a = cmd.args
+            if k is CommandKind.STRATEGIES:
+                return control.strategies()
+            if k is CommandKind.SHOW_STRATEGY:
+                return control.show_strategy(a[0])
+            if k is CommandKind.ENABLE:
+                return await control.set_enabled(a[0], True)
+            if k is CommandKind.DISABLE:
+                return await control.set_enabled(a[0], False)
+            if k is CommandKind.NEW_STRATEGY:
+                return await control.new_strategy(a[0]) if a[0] else control.fields()
+            if k is CommandKind.DELETE_STRATEGY:
+                return await control.delete_strategy(a[0])
+            if k is CommandKind.STRATEGY_PARAM:
+                return control.set_param(*a)
+            if k is CommandKind.FIELDS:
+                return control.fields()
+            if k is CommandKind.STATS:
+                return await control.stats()
+            if k is CommandKind.SETTINGS:
+                return control.show_settings(a[0] or None)
+            if k is CommandKind.SET:
+                return control.propose_setting(a[0], a[1])
+            if k in (CommandKind.ADD_SYMBOL, CommandKind.REMOVE_SYMBOL):
+                syms = [x for x in re.split(r"[,\s]+(?:and\s+)?", a[1]) if x and x != "and"]
+                return await control.modify_symbols(a[0], "add" if k is CommandKind.ADD_SYMBOL else "remove", syms)
+            if k is CommandKind.CONFIRM:
+                return await control.confirm()
+            if k is CommandKind.CANCEL:
+                return control.cancel()
+            if k is CommandKind.RESET_SETTINGS:
+                return control.reset_settings()
+        elif k not in (CommandKind.STATUS, CommandKind.ANALYZE, CommandKind.WHY, CommandKind.TRANSCRIPT,
+                       CommandKind.PAUSE, CommandKind.RESUME, CommandKind.FLATTEN, CommandKind.HELP, CommandKind.UNKNOWN):
+            return f"{self.title}, strategy and settings changes aren't available in this mode."
         if k is CommandKind.HELP:
             return f"{self.title}, {HELP_TEXT}"
         if k is CommandKind.STATUS:

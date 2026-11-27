@@ -99,9 +99,37 @@ class ReplayReport:
             lines.append("Top veto reasons:")
             lines += [f"  {n:>3}x {r}" for r, n in self.veto_reasons.most_common(5)]
         if self.trades:
+            lines.append("By strategy (net of fees):")
+            lines.append(format_strategy_breakdown(strategy_breakdown(self.trades)))
             lines.append("Trades:")
             for t in self.trades:
-                lines.append(f"  {t.ticker:<5} {t.direction.value:<5} {t.initial_qty:>5} @ {t.entry_price:>9.2f} "
-                             f"-> {t.exit_reason.value if t.exit_reason else '?':<14} net {net_pnl(t):+9.2f}")
+                lines.append(f"  {t.ticker:<8} {t.direction.value:<5} {t.initial_qty:>12g} @ {t.entry_price:>10.2f} "
+                             f"-> {t.exit_reason.value if t.exit_reason else '?':<14} net {net_pnl(t):+9.2f}  "
+                             f"[{t.strategy or '?'}]")
         lines += [f"Note: {n}" for n in self.notes]
         return "\n".join(lines)
+
+
+def strategy_breakdown(trades: list[Position]) -> list[dict]:
+    """Per-strategy results (net of fees), best total P&L first."""
+    groups: dict[str, list[Position]] = {}
+    for t in trades:
+        groups.setdefault(t.strategy or "(unlabelled)", []).append(t)
+    rows = []
+    for name, ts in groups.items():
+        pnls = [net_pnl(t) for t in ts]
+        wins = sum(1 for p in pnls if p > 0)
+        rows.append({"strategy": name, "trades": len(ts), "wins": wins, "win_rate": wins / len(ts),
+                     "net_pnl": round(sum(pnls), 2), "avg_pnl": round(sum(pnls) / len(ts), 2),
+                     "profit_factor": profit_factor(pnls)})
+    return sorted(rows, key=lambda r: r["net_pnl"], reverse=True)
+
+
+def format_strategy_breakdown(rows: list[dict]) -> str:
+    lines = [f"  {'strategy':<24} {'trades':>6} {'win%':>6} {'net P&L':>11} {'avg':>9} {'PF':>6}"]
+    for r in rows:
+        pf = r["profit_factor"]
+        pf_s = "n/a" if pf is None else ("inf" if pf == float("inf") else f"{pf:.2f}")
+        lines.append(f"  {r['strategy']:<24} {r['trades']:>6} {r['win_rate']:>6.0%} {r['net_pnl']:>+11,.2f} "
+                     f"{r['avg_pnl']:>+9,.2f} {pf_s:>6}")
+    return "\n".join(lines)

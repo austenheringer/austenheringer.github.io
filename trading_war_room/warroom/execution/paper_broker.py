@@ -204,7 +204,7 @@ class PaperBroker:
         now = self.clock.now()
         pos = Position(plan_id=plan.id, ticker=plan.ticker, direction=d, entry_price=fill, stop_loss=plan.stop_loss,
                        tp1=plan.tp1, tp2=plan.tp2, initial_qty=qty, qty=qty, reserved_margin=round(margin, 4),
-                       commissions=comm, opened_at=now, last_price=last)
+                       commissions=comm, opened_at=now, last_price=last, strategy=plan.strategy)
         self.positions[pos.id] = pos
         self.last_prices[pos.ticker] = last
         f = Fill(position_id=pos.id, ticker=pos.ticker, direction=d, is_entry=True, qty=qty, price=fill,

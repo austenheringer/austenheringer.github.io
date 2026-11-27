@@ -82,6 +82,9 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     open_positions INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS risk_state (trading_date TEXT PRIMARY KEY, payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS llm_usage (day TEXT PRIMARY KEY, calls INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS settings_changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, path TEXT NOT NULL,
+    old TEXT, new TEXT, source TEXT NOT NULL);
 """
 
 
@@ -322,6 +325,16 @@ class Database:
             "INSERT OR REPLACE INTO risk_state VALUES (?,?)", (state.trading_date.isoformat(), state.model_dump_json())
         ))
 
+    async def log_setting_change(self, when: datetime, path: str, old: Any, new: Any, source: str = "chat") -> None:
+        await self._tx(lambda c: c.execute(
+            "INSERT INTO settings_changes(timestamp, path, old, new, source) VALUES (?,?,?,?,?)",
+            (ts(when), path, json.dumps(old, default=str), json.dumps(new, default=str), source)))
+
+    async def load_all_closed_positions(self) -> list[Position]:
+        rows = await self._run(lambda c: c.execute(
+            "SELECT payload FROM positions WHERE status=? ORDER BY closed_at", (PositionStatus.CLOSED.value,)).fetchall())
+        return [Position.model_validate_json(r["payload"]) for r in rows]
+
     async def set_llm_usage(self, day: date, calls: int) -> None:
         await self._tx(lambda c: c.execute("INSERT OR REPLACE INTO llm_usage VALUES (?,?)", (day.isoformat(), calls)))
 
@@ -389,7 +402,8 @@ class Database:
         return WarRoomTranscript.model_validate_json(row["payload"]) if row else None
 
     async def count(self, table: str) -> int:
-        if table not in {"signals", "debates", "agent_messages", "risk_vetoes", "positions", "fills", "equity_snapshots"}:
+        if table not in {"signals", "debates", "agent_messages", "risk_vetoes", "positions", "fills", "equity_snapshots",
+                         "settings_changes"}:
             raise ValueError(table)
         row = await self._run(lambda c: c.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone())  # noqa: S608
         return int(row["n"])

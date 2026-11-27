@@ -124,6 +124,23 @@ class CryptoSection(_Section):
         return self
 
 
+class StrategiesSection(_Section):
+    enabled: list[str] = Field(default_factory=lambda: [
+        "orb_breakout", "range_breakout", "vwap_bounce", "ema_pullback", "rvol_momentum"])
+    rules_dir: str = "strategies"          # user rule files: strategies/<name>.yaml
+    params: dict[str, dict[str, float]] = Field(default_factory=dict)  # built-in parameter overrides
+
+    @field_validator("enabled")
+    @classmethod
+    def _names(cls, v: list[str]) -> list[str]:
+        out = []
+        for n in v:
+            n = n.strip().lower()
+            if n and n not in out:
+                out.append(n)
+        return out
+
+
 class AccountSection(_Section):
     starting_equity: float = Field(default=100_000.0, gt=0)
     starting_cash: float = Field(default=100_000.0, gt=0)
@@ -302,6 +319,7 @@ class AppConfig(_Section):
     app: AppSection = Field(default_factory=AppSection)
     demo: DemoSection = Field(default_factory=DemoSection)
     crypto: CryptoSection = Field(default_factory=CryptoSection)
+    strategies: StrategiesSection = Field(default_factory=StrategiesSection)
     account: AccountSection = Field(default_factory=AccountSection)
     risk: RiskSection = Field(default_factory=RiskSection)
     technical: TechnicalSection = Field(default_factory=TechnicalSection)
@@ -371,8 +389,9 @@ def _format_validation_error(err: ValidationError, source: str) -> str:
     return "\n".join(lines)
 
 
-def load_config(path: str | Path = "config.yaml") -> AppConfig:
-    """Load and validate ``config.yaml``. Raises :class:`ConfigError`."""
+def load_config(path: str | Path = "config.yaml", overrides: str | Path | None = None) -> AppConfig:
+    """Load and validate ``config.yaml``, optionally merging the chat-made overrides file
+    (``data/config_overrides.yaml``). Raises :class:`ConfigError`."""
     path = Path(path)
     if not path.exists():
         raise ConfigError(f"Config file not found: {path}")
@@ -382,7 +401,18 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         raise ConfigError(f"Could not parse {path}: {exc}") from exc
     if not isinstance(raw, dict):
         raise ConfigError(f"{path} must contain a YAML mapping at the top level")
-    return parse_config(raw, source=str(path))
+    source = str(path)
+    if overrides is not None and Path(overrides).exists():
+        from warroom.settings_manager import deep_merge
+
+        try:
+            over = yaml.safe_load(Path(overrides).read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError as exc:
+            raise ConfigError(f"Could not parse {overrides}: {exc}") from exc
+        if isinstance(over, dict) and over:
+            raw = deep_merge(raw, over)
+            source = f"{path} + {overrides}"
+    return parse_config(raw, source=source)
 
 
 def parse_config(raw: dict, source: str = "<dict>") -> AppConfig:

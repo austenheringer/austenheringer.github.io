@@ -42,6 +42,15 @@ crypto:
     ETH-USD: {qty_step: 0.00000001, min_qty: 0.002, min_notional: 0.5, price_decimals: 2}
     SOL-USD: {qty_step: 0.00000001, min_qty: 0.02, min_notional: 0.5, price_decimals: 2}
 
+strategies:
+  # Which setups the Technical agent looks for. Built-ins: orb_breakout (stocks), range_breakout
+  # (crypto), vwap_bounce, ema_pullback, rvol_momentum. Your own rule strategies live in
+  # strategies/<name>.yaml (see strategies/README.md) and are switched on by adding their name here
+  # - or just tell J.A.R.V.I.S.: "enable my_strategy".
+  enabled: [orb_breakout, range_breakout, vwap_bounce, ema_pullback, rvol_momentum]
+  rules_dir: strategies
+  params: {}                        # e.g. {rvol_momentum: {rvol_multiple: 1.5}}
+
 account:
   starting_equity: 100000.0
   starting_cash: 100000.0
